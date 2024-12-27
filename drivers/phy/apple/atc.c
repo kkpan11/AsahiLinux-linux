@@ -2033,6 +2033,41 @@ static int atcphy_probe_switch(struct apple_atcphy *atcphy)
 	return PTR_ERR_OR_ZERO(typec_switch_register(atcphy->dev, &sw_desc));
 }
 
+static void atcphy_configure_pipehandler(struct apple_atcphy *atcphy)
+{
+	int ret;
+
+	BUG_ON(!mutex_is_locked(&atcphy->lock));
+
+	/* TODO: explain why this is silly but required; sync with reset controller */
+	set32(atcphy->regs.pipehandler + PIPEHANDLER_NONSELECTED_OVERRIDE,
+	      PIPEHANDLER_DUMMY_PHY_EN);
+	clear32(atcphy->regs.pipehandler + PIPEHANDLER_AON_GEN,
+		PIPEHANDLER_AON_GEN_DWC3_FORCE_CLAMP_EN);
+	set32(atcphy->regs.pipehandler + PIPEHANDLER_AON_GEN,
+	      PIPEHANDLER_AON_GEN_DWC3_RESET_N);
+
+	/*
+	[Dwc3Tracer@/arm-io/usb-drd1] MMIO: R.4   PIPEHANDLER_OVERRIDE_VALUES = 0x16 (RXVALID=0, RXDETECT=1)
+[Dwc3Tracer@/arm-io/usb-drd1] MMIO: W.4   PIPEHANDLER_OVERRIDE_VALUES = 0x10 (RXVALID=0, RXDETECT=0)
+[Dwc3Tracer@/arm-io/usb-drd1] MMIO: R.4   PIPEHANDLER_OVERRIDE = 0x0 (RXVALID=0, RXDETECT=0)
+[Dwc3Tracer@/arm-io/usb-drd1] MMIO: W.4   PIPEHANDLER_OVERRIDE = 0x1 (RXVALID=1, RXDETECT=0)
+[Dwc3Tracer@/arm-io/usb-drd1] MMIO: R.4   PIPEHANDLER_OVERRIDE = 0x1 (RXVALID=1, RXDETECT=0)
+[Dwc3Tracer@/arm-io/usb-drd1] MMIO: W.4   PIPEHANDLER_OVERRIDE = 0x5 (RXVALID=1, RXDETECT=1)
+*/
+	ret = atcphy_pipehandler_lock(atcphy);
+	if (ret) {
+		dev_err(atcphy->dev, "Failed to lock pipehandler");
+		return;
+	}
+
+	ret = atcphy_pipehandler_unlock(atcphy);
+	if (ret) {
+		dev_err(atcphy->dev, "Failed to unlock pipehandler");
+		return;
+	}
+}
+
 static int atcphy_mux_set(struct typec_mux_dev *mux,
 			  struct typec_mux_state *state)
 {
@@ -2098,8 +2133,9 @@ static int atcphy_mux_set(struct typec_mux_dev *mux,
 		atcphy->target_mode = APPLE_ATCPHY_MODE_OFF;
 	}
 
-	//if (atcphy->mode != atcphy->target_mode)
-	//	WARN_ON(!schedule_work(&atcphy->mux_set_work));
+	atcphy_configure(atcphy, atcphy->target_mode);
+	atcphy_configure_pipehandler(atcphy);
+	atcphy->mode = atcphy->target_mode;
 
 	return 0;
 }
