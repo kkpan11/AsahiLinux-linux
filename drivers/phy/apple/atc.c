@@ -1702,6 +1702,7 @@ static int atcphy_usb3_power_off(struct phy *phy)
 	struct apple_atcphy *atcphy = phy_get_drvdata(phy);
 	guard(mutex)(&atcphy->lock);
 
+	printk("HVLOG: atcphy_usb3_power_off\n");
 	atcphy_configure_pipehandler_dummy(atcphy);
 
 	return 0;
@@ -1712,6 +1713,7 @@ static int atcphy_usb3_power_on(struct phy *phy)
 	struct apple_atcphy *atcphy = phy_get_drvdata(phy);
 	guard(mutex)(&atcphy->lock);
 
+	printk("HVLOG: atcphy_usb3_power_on\n");
 	atcphy_configure_pipehandler(atcphy);
 	return 0;
 }
@@ -1719,6 +1721,8 @@ static int atcphy_usb3_power_on(struct phy *phy)
 static int atcphy_usb3_set_mode(struct phy *phy, enum phy_mode mode,
 				int submode)
 {
+	printk("HVLOG: atcphy_usb3_set_mode: %d %d\n", mode, submode);
+
 	return 0;
 }
 
