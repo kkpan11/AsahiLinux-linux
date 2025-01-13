@@ -430,8 +430,7 @@
 
 /* USB2 PHY regs */
 #define USB2PHY_USBCTL 0x00
-#define USB2PHY_USBCTL_DEVICE 1
-#define USB2PHY_USBCTL_HOST 2
+#define USB2PHY_USBCTL_RUN 2
 #define USB2PHY_USBCTL_ISOLATION 4
 
 #define USB2PHY_CTL 0x04
@@ -1720,13 +1719,16 @@ static int atcphy_usb2_power_off(struct phy *phy)
 
 	printk("HVLOG: atcphy_usb2_power_off\n");
 
-	/* reset the PHY before transitioning to low power mode */
-	clear32(atcphy->regs.usb2phy + USB2PHY_CTL, USB2PHY_CTL_APB_RESET_N);
-	set32(atcphy->regs.usb2phy + USB2PHY_CTL,
-	      USB2PHY_CTL_RESET | USB2PHY_CTL_PORT_RESET);
+	writel(USB2PHY_USBCTL_ISOLATION,
+		atcphy->regs.usb2phy + USB2PHY_USBCTL);
 
 	/* switch the PHY to low power mode */
 	set32(atcphy->regs.usb2phy + USB2PHY_CTL, USB2PHY_CTL_SIDDQ);
+
+	/* reset the PHY before transitioning to low power mode */
+	set32(atcphy->regs.usb2phy + USB2PHY_CTL,
+	      USB2PHY_CTL_RESET | USB2PHY_CTL_PORT_RESET);
+	clear32(atcphy->regs.usb2phy + USB2PHY_CTL, USB2PHY_CTL_APB_RESET_N);
 
 	return 0;
 }
@@ -1746,7 +1748,7 @@ static int atcphy_usb2_set_mode(struct phy *phy, enum phy_mode mode,
 	case PHY_MODE_USB_HOST_HS:
 	case PHY_MODE_USB_HOST_SS:
 		set32(atcphy->regs.usb2phy + USB2PHY_SIG, USB2PHY_SIG_HOST);
-		writel(USB2PHY_USBCTL_HOST,
+		writel(USB2PHY_USBCTL_RUN,
 		       atcphy->regs.usb2phy + USB2PHY_USBCTL);
 		return 0;
 
@@ -1756,7 +1758,7 @@ static int atcphy_usb2_set_mode(struct phy *phy, enum phy_mode mode,
 	case PHY_MODE_USB_DEVICE_HS:
 	case PHY_MODE_USB_DEVICE_SS:
 		clear32(atcphy->regs.usb2phy + USB2PHY_SIG, USB2PHY_SIG_HOST);
-		writel(USB2PHY_USBCTL_DEVICE,
+		writel(USB2PHY_USBCTL_RUN,
 		       atcphy->regs.usb2phy + USB2PHY_USBCTL);
 		return 0;
 
