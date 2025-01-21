@@ -123,6 +123,7 @@ enum drm_asahi_feat_compat {
 	DRM_ASAHI_FEAT_SOFT_FAULTS = (1UL) << 0,
 	DRM_ASAHI_FEAT_GETTIME = (1UL) << 1, /* Remove for upstream */
 	DRM_ASAHI_FEAT_USER_TIMESTAMPS = (1UL) << 2,
+	DRM_ASAHI_FEAT_SINGLE_PAGE_MAP = (1UL) << 3,
 };
 
 /** Incompatible feature bits */
@@ -233,6 +234,8 @@ enum drm_asahi_bind_op {
 #define ASAHI_BIND_READ		(1L << 0)
 /** Map BO with GPU write permission */
 #define ASAHI_BIND_WRITE	(1L << 1)
+/** Map a single page of the BO repeatedly across the VA range */
+#define ASAHI_BIND_SINGLE_PAGE	(1L << 2)
 
 /** BO VM_BIND operations */
 struct drm_asahi_gem_bind {
