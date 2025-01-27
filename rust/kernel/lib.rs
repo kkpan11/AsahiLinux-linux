@@ -46,6 +46,7 @@ pub mod alloc;
 pub mod block;
 mod build_assert;
 pub mod delay;
+pub mod devcoredump;
 pub mod device;
 pub mod device_id;
 pub mod devres;
