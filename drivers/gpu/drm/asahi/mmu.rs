@@ -349,7 +349,10 @@ impl gpuvm::DriverGpuVm for VmInner {
         }
 
         if let Some(prev_op) = op.prev_map() {
-            let prev_gpuva = ctx.prev_va.take().expect("Multiple step_remap calls with prev_op");
+            let prev_gpuva = ctx
+                .prev_va
+                .take()
+                .expect("Multiple step_remap calls with prev_op");
             if prev_op.map_and_link_va(self, prev_gpuva, &vm_bo).is_err() {
                 dev_err!(self.dev.as_ref(), "step_remap: could not relink prev gpuva");
                 return Err(EINVAL);
@@ -357,7 +360,10 @@ impl gpuvm::DriverGpuVm for VmInner {
         }
 
         if let Some(next_op) = op.next_map() {
-            let next_gpuva = ctx.next_va.take().expect("Multiple step_remap calls with next_op");
+            let next_gpuva = ctx
+                .next_va
+                .take()
+                .expect("Multiple step_remap calls with next_op");
             if next_op.map_and_link_va(self, next_gpuva, &vm_bo).is_err() {
                 dev_err!(self.dev.as_ref(), "step_remap: could not relink next gpuva");
                 return Err(EINVAL);
