@@ -369,7 +369,7 @@ impl SndSocAopData {
     fn request_dma_channel(&self) -> Result<*mut bindings::dma_chan> {
         let res = unsafe {
             from_err_ptr(bindings::of_dma_request_slave_channel(
-                self.of.node() as *const _ as *mut _,
+                self.of.as_raw(),
                 c_str!("dma").as_ptr() as _,
             ))
         };
