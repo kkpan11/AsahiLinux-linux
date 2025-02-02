@@ -4,6 +4,8 @@
 //! the <https://github.com/rust-lang/rust> repository, licensed under
 //! "Apache-2.0 OR MIT" and adapted for kernel use. For copyright details,
 //! see <https://github.com/rust-lang/rust/blob/master/COPYRIGHT>.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 
 use core::fmt;
 use core::iter::FusedIterator;
