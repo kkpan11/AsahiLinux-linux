@@ -95,7 +95,7 @@ impl Node {
     }
 
     /// Returns a reference to the underlying C `device_node` structure.
-    pub fn node(&self) -> &bindings::device_node {
+    pub(crate) fn node(&self) -> &bindings::device_node {
         // SAFETY: `raw_node` is valid per the type invariant.
         unsafe { &*self.raw_node }
     }
