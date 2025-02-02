@@ -103,7 +103,7 @@ impl Node {
     /// Returns a reference to the underlying C `device_node` structure.
     pub fn as_raw(&self) -> *mut bindings::device_node {
         // SAFETY: `raw_node` is valid per the type invariant.
-        unsafe { self.raw_node }
+        self.raw_node
     }
 
     /// Returns the name of the node.
