@@ -6,7 +6,6 @@
 //! see <https://github.com/rust-lang/rust/blob/master/COPYRIGHT>.
 #![allow(clippy::undocumented_unsafe_blocks)]
 
-
 use core::fmt;
 use core::iter::FusedIterator;
 use core::mem::{self, ManuallyDrop, SizedTypeProperties};
