@@ -258,7 +258,7 @@ fn filter_versions(
         match &tail {
             Some(TokenTree::Group(group)) => {
                 let new_body =
-                    filter_versions(config, tag, ver, &mut group.stream().into_iter(), is_struct);
+                    filter_versions(config, tag, ver, group.stream().into_iter(), is_struct);
                 let mut stream = TokenStream::new();
                 stream.extend(new_body);
                 let mut filtered_group = Group::new(group.delimiter(), stream);
