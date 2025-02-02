@@ -79,7 +79,7 @@ impl<T: MailCallback> Mailbox<T> {
     }
 }
 
-impl<T: MailCallback> Mailbox<T> {
+impl<T: MailCallback> Drop for Mailbox<T> {
     fn drop(&mut self) {
         // SAFETY: mbox is a valid pointer
         unsafe { bindings::apple_mbox_stop(self.mbox) };
