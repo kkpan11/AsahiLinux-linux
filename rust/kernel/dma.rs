@@ -63,7 +63,7 @@ pub fn try_alloc_coherent<T>(
 
 pub struct Pool<T> {
     ptr: *mut bindings::dma_pool,
-    dev: ARef<Device>,
+    _dev: ARef<Device>,
     count: usize,
     _p: PhantomData<T>,
 }
@@ -89,7 +89,7 @@ impl<T> Pool<T> {
                 Self {
                     ptr,
                     count,
-                    dev,
+                    _dev: dev,
                     _p: PhantomData,
                 },
                 flags::GFP_KERNEL,
