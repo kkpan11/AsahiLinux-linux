@@ -64,7 +64,7 @@ impl<T: MailCallback> Mailbox<T> {
         unsafe {
             (*mbox).cookie = ptr;
             (*mbox).rx = Some(mailbox_rx_callback::<T>);
-            to_result(unsafe { bindings::apple_mbox_start(mbox) })?;
+            to_result(bindings::apple_mbox_start(mbox))?;
         }
         guard.dismiss();
         Ok(Mailbox {
