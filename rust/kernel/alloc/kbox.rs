@@ -464,6 +464,6 @@ where
     A: Allocator,
 {
     fn as_ref(&self) -> &T {
-        &*self
+        &**self
     }
 }
