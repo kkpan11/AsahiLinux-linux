@@ -1096,7 +1096,7 @@ atcphy_dp_configure_lane(struct apple_atcphy *atcphy, enum atcphy_lane lane,
 
 	printk("HVLOG: atcphy_dp_configure_lane %d\n", lane);
 
-	BUG_ON(!mutex_is_locked(&atcphy->lock));
+	WARN_ON(!mutex_is_locked(&atcphy->lock));
 
 	switch (lane) {
 	case APPLE_ATCPHY_LANE_0:
@@ -1364,7 +1364,7 @@ static int atcphy_auspll_apb_command(struct apple_atcphy *atcphy, u32 command)
 				 100000);
 	if (ret) {
 		dev_err(atcphy->dev, "AUSPLL APB command was not acked.\n");
-		BUG_ON(1);
+		WARN_ON(1);
 		// TODO: maybe remove the return here and just hope for the best
 		return ret;
 	}
@@ -1571,7 +1571,7 @@ static int atcphy_configure(struct apple_atcphy *atcphy, enum atcphy_mode mode)
 {
 	int ret = 0;
 
-	BUG_ON(!mutex_is_locked(&atcphy->lock));
+	WARN_ON(!mutex_is_locked(&atcphy->lock));
 
 	printk("HVLOG: atcphy_configure %d\n", mode);
 
@@ -1658,7 +1658,7 @@ static int atcphy_pipehandler_lock(struct apple_atcphy *atcphy)
 		clear32(atcphy->regs.pipehandler + PIPEHANDLER_LOCK_REQ, 1);
 		dev_err(atcphy->dev,
 			"pipehandler lock not acked and we can't do much about it. this type-c port is probably dead until at least the next plug/unplug or possibly even until the next reboot.\n");
-		BUG_ON(1);
+		WARN_ON(1);
 	}
 
 	return ret;
@@ -1677,7 +1677,7 @@ static int atcphy_pipehandler_unlock(struct apple_atcphy *atcphy)
 	if (ret) {
 		dev_err(atcphy->dev,
 			"pipehandler lock release not acked and we can't do much about it. this type-c port is probably dead until at least the next plug/unplug or possibly even until the next reboot.\n");
-		BUG_ON(1);
+		WARN_ON(1);
 	}
 
 	return ret;
@@ -1834,7 +1834,7 @@ static int atcphy_dpphy_set_mode(struct phy *phy, enum phy_mode mode,
 				 int submode)
 {
 	struct apple_atcphy *atcphy = phy_get_drvdata(phy);
-	BUG_ON(atcphy->hw->dp_only);
+	WARN_ON(atcphy->hw->dp_only);
 
 	/* nothing to do here since the setup already happened in mux_set */
 	if (mode == PHY_MODE_DP && submode == 0)
@@ -1848,7 +1848,7 @@ static int atcphy_dpphy_set_mode_dp_only(struct phy *phy, enum phy_mode mode,
 	struct apple_atcphy *atcphy = phy_get_drvdata(phy);
 	guard(mutex)(&atcphy->lock);
 
-	BUG_ON(!atcphy->hw->dp_only);
+	WARN_ON(!atcphy->hw->dp_only);
 
 	switch (mode) {
 	case PHY_MODE_DP:
@@ -2208,7 +2208,7 @@ static int atcphy_probe_switch(struct apple_atcphy *atcphy)
 
 static int atcphy_pipehandler_check(struct apple_atcphy *atcphy)
 {
-	BUG_ON(!mutex_is_locked(&atcphy->lock));
+	WARN_ON(!mutex_is_locked(&atcphy->lock));
 
 	if (readl(atcphy->regs.pipehandler + PIPEHANDLER_LOCK_ACK) &
 	    PIPEHANDLER_LOCK_EN) {
@@ -2375,7 +2375,7 @@ static void atcphy_configure_pipehandler_dummy(struct apple_atcphy *atcphy)
 
 static void atcphy_configure_pipehandler(struct apple_atcphy *atcphy)
 {
-	BUG_ON(!mutex_is_locked(&atcphy->lock));
+	WARN_ON(!mutex_is_locked(&atcphy->lock));
 
 	switch (atcphy_modes[atcphy->target_mode].pipehandler_state) {
 	case ATCPHY_PIPEHANDLER_STATE_INVALID:
@@ -2398,8 +2398,8 @@ static void atcphy_configure_pipehandler(struct apple_atcphy *atcphy)
 
 static void atcphy_setup_pipehandler(struct apple_atcphy *atcphy)
 {
-	BUG_ON(!mutex_is_locked(&atcphy->lock));
-	BUG_ON(atcphy->pipehandler_state != ATCPHY_PIPEHANDLER_STATE_INVALID);
+	WARN_ON(!mutex_is_locked(&atcphy->lock));
+	WARN_ON(atcphy->pipehandler_state != ATCPHY_PIPEHANDLER_STATE_INVALID);
 
 	mask32(atcphy->regs.pipehandler + PIPEHANDLER_MUX_CTRL, PIPEHANDLED_MUX_CTRL_CLK,
 	       FIELD_PREP(PIPEHANDLED_MUX_CTRL_CLK, PIPEHANDLED_MUX_CTRL_CLK_OFF));
