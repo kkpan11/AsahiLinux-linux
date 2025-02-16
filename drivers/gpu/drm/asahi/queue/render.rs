@@ -822,7 +822,7 @@ impl super::QueueInner::ver {
             |inner, _ptr| {
                 let vm_slot = vm_bind.slot();
                 let aux_fb_info = fw::fragment::raw::AuxFBInfo::ver {
-                    iogpu_unk_214: cmdbuf.iogpu_unk_214,
+                    isp_ctl: cmdbuf.isp_ctl,
                     unk2: 0,
                     width: cmdbuf.fb_width,
                     height: cmdbuf.fb_height,
@@ -959,7 +959,7 @@ impl super::QueueInner::ver {
                             r.add(0x16098, inner.scene.tvb_heapmeta_pointer().into());
                             r.add(0x15109, cmdbuf.scissor_array); // ISP_SCISSOR_BASE
                             r.add(0x15101, cmdbuf.depth_bias_array); // ISP_DBIAS_BASE
-                            r.add(0x15021, cmdbuf.iogpu_unk_214.into()); // aux_fb_info.unk_1
+                            r.add(0x15021, cmdbuf.isp_ctl.into()); // aux_fb_info.unk_1
                             r.add(
                                 0x15211,
                                 ((cmdbuf.fb_height as u64) << 32) | cmdbuf.fb_width as u64,
