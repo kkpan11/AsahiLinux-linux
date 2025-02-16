@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! Hardware configuration for t600x (M1 Pro/Max/Ultra) platforms.
+//! Hardware configuration for t602x (M2 Pro/Max/Ultra) platforms.
 
 use crate::f32;
 
