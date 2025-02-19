@@ -50,7 +50,7 @@ pub(crate) mod raw {
     #[derive(Debug, Clone, Copy)]
     #[repr(C)]
     pub(crate) struct AuxFBInfo {
-        pub(crate) iogpu_unk_214: u32,
+        pub(crate) isp_ctl: u32,
         pub(crate) unk2: u32,
         pub(crate) width: u32,
         pub(crate) height: u32,

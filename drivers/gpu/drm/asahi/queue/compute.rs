@@ -35,7 +35,6 @@ impl super::QueueInner::ver {
         &self,
         job: &mut Job<super::QueueJob::ver>,
         cmd: &uapi::drm_asahi_command,
-        result_writer: Option<super::ResultWriter>,
         objects: Pin<&xarray::XArray<KBox<file::Object>>>,
         id: u64,
         flush_stamps: bool,
@@ -75,60 +74,13 @@ impl super::QueueInner::ver {
             )
         })?;
 
-        if cmdbuf.flags & !(uapi::ASAHI_COMPUTE_NO_PREEMPTION as u64) != 0 {
+        if cmdbuf.flags != 0 {
             return Err(EINVAL);
         }
 
         let mut user_timestamps: fw::job::UserTimestamps = Default::default();
-
-        let mut ext_ptr = cmdbuf.extensions;
-        while ext_ptr != 0 {
-            // SAFETY: There is a double read from userspace here, but there is no TOCTOU
-            // issue since at worst the extension parse below will read garbage, and
-            // we do not trust any fields anyway.
-            let ext_type = UserSlice::new(ext_ptr as UserPtr, 4)
-                .reader()
-                .read::<u32>()?;
-
-            match ext_type {
-                uapi::ASAHI_COMPUTE_EXT_TIMESTAMPS => {
-                    let mut ext_user_timestamps: uapi::drm_asahi_cmd_compute_user_timestamps =
-                        Default::default();
-
-                    // SAFETY: See above
-                    let mut ext_reader = UserSlice::new(
-                        ext_ptr as UserPtr,
-                        core::mem::size_of::<uapi::drm_asahi_cmd_compute_user_timestamps>(),
-                    )
-                    .reader();
-                    // SAFETY: The output buffer is valid and of the correct size, and all bit
-                    // patterns are valid.
-                    ext_reader.read_raw(unsafe {
-                        core::slice::from_raw_parts_mut(
-                            &mut ext_user_timestamps as *mut _ as *mut MaybeUninit<u8>,
-                            core::mem::size_of::<uapi::drm_asahi_cmd_compute_user_timestamps>(),
-                        )
-                    })?;
-
-                    user_timestamps.start = common::get_timestamp_object(
-                        objects,
-                        ext_user_timestamps.start_handle,
-                        ext_user_timestamps.start_offset,
-                    )?;
-                    user_timestamps.end = common::get_timestamp_object(
-                        objects,
-                        ext_user_timestamps.end_handle,
-                        ext_user_timestamps.end_offset,
-                    )?;
-
-                    ext_ptr = ext_user_timestamps.next;
-                }
-                _ => {
-                    cls_pr_debug!(Errors, "Unknown extension {}\n", ext_type);
-                    return Err(EINVAL);
-                }
-            }
-        }
+        user_timestamps.start = common::get_timestamp_object(objects, cmdbuf.ts.start)?;
+        user_timestamps.end = common::get_timestamp_object(objects, cmdbuf.ts.end)?;
 
         // This sequence number increases per new client/VM? assigned to some slot,
         // but it's unclear *which* slot...
@@ -185,7 +137,6 @@ impl super::QueueInner::ver {
         let comp = GpuObject::new_init_prealloc(
             kalloc.gpu_ro.alloc_object()?,
             |ptr: GpuWeakPointer<fw::compute::RunCompute::ver>| {
-                let has_result = result_writer.is_some();
                 let notifier = notifier.clone();
                 let vm_bind = vm_bind.clone();
                 try_init!(fw::compute::RunCompute::ver {
@@ -227,7 +178,7 @@ impl super::QueueInner::ver {
                             notifier_buf: inner_weak_ptr!(notifier.weak_pointer(), state.unk_buf),
                         })?;
 
-                        if has_result || user_timestamps.any() {
+                        if user_timestamps.any() {
                             builder.add(microseq::Timestamp::ver {
                                 header: microseq::op::Timestamp::new(true),
                                 command_time: inner_weak_ptr!(ptr, command_time),
@@ -251,7 +202,7 @@ impl super::QueueInner::ver {
                             header: microseq::op::WaitForIdle2::HEADER,
                         })?;
 
-                        if has_result || user_timestamps.any() {
+                        if user_timestamps.any() {
                             builder.add(microseq::Timestamp::ver {
                                 header: microseq::op::Timestamp::new(false),
                                 command_time: inner_weak_ptr!(ptr, command_time),
@@ -334,14 +285,14 @@ impl super::QueueInner::ver {
                         preempt_buf5: inner.preempt_buf.gpu_offset_pointer(preempt5_off),
                         pipeline_base: U64(cmdbuf.usc_base),
                         unk_38: U64(0x8c60),
-                        helper_program: cmdbuf.helper_program, // Internal program addr | 1
+                        helper_program: cmdbuf.helper.binary, // Internal program addr | 1
                         unk_44: 0,
-                        helper_arg: U64(cmdbuf.helper_arg), // Only if internal program used
-                        helper_cfg: cmdbuf.helper_cfg, // 0x40 if internal program used
+                        helper_arg: U64(cmdbuf.helper.data), // Only if internal program used
+                        helper_cfg: cmdbuf.helper.cfg, // 0x40 if internal program used
                         unk_54: 0,
                         unk_58: 1,
                         unk_5c: 0,
-                        iogpu_unk_40: cmdbuf.iogpu_unk_40, // 0x1c if internal program used
+                        iogpu_unk_40: 0, // 0x1c if internal program used
                         __pad: Default::default(),
                     }),
                     #[ver(G >= G14X)]
@@ -356,11 +307,11 @@ impl super::QueueInner::ver {
                             r.add(0x1a4e0, inner.preempt_buf.gpu_offset_pointer(preempt4_off).into());
                             r.add(0x1a4e8, inner.preempt_buf.gpu_offset_pointer(preempt5_off).into());
                             r.add(0x10071, cmdbuf.usc_base); // USC_EXEC_BASE_CP
-                            r.add(0x11841, cmdbuf.helper_program.into());
-                            r.add(0x11849, cmdbuf.helper_arg);
-                            r.add(0x11f81, cmdbuf.helper_cfg.into());
+                            r.add(0x11841, cmdbuf.helper.binary.into());
+                            r.add(0x11849, cmdbuf.helper.data);
+                            r.add(0x11f81, cmdbuf.helper.cfg.into());
                             r.add(0x1a440, 0x24201);
-                            r.add(0x12091, cmdbuf.iogpu_unk_40.into());
+                            r.add(0x12091, 0 /* iogpu_unk_40 */);
                             /*
                             r.add(0x10201, 0x100); // Some kind of counter?? Does this matter?
                             r.add(0x10428, 0x100); // Some kind of counter?? Does this matter?
@@ -391,18 +342,15 @@ impl super::QueueInner::ver {
                         unk_10: 0x0,    // fixed
                         encoder_id: cmdbuf.encoder_id,
                         unk_18: 0x0, // fixed
-                        unk_mask: cmdbuf.unk_mask,
-                        sampler_array: U64(cmdbuf.sampler_array),
-                        sampler_count: cmdbuf.sampler_count,
-                        sampler_max: cmdbuf.sampler_max,
+                        unk_mask: 0xffffffff,
+                        sampler_array: U64(cmdbuf.sampler_heap),
+                        sampler_count: (cmdbuf.sampler_count as u32),
+                        sampler_max: (cmdbuf.sampler_count as u32) + 1,
                     }),
                     meta <- try_init!(fw::job::raw::JobMeta {
                         unk_0: 0,
                         unk_2: 0,
-                        // TODO: make separate flag
-                        no_preemption: (cmdbuf.flags
-                        & uapi::ASAHI_COMPUTE_NO_PREEMPTION as u64
-                        != 0) as u8,
+                        no_preemption: 0,
                         stamp: ev_comp.stamp_pointer,
                         fw_stamp: ev_comp.fw_stamp_pointer,
                         stamp_value: ev_comp.value.next(),
@@ -442,22 +390,6 @@ impl super::QueueInner::ver {
         comp_job.add_cb(comp, vm_bind.slot(), move |cmd, error| {
             if let Some(err) = error {
                 fence.set_error(err.into())
-            }
-            if let Some(mut rw) = result_writer {
-                let mut result: uapi::drm_asahi_result_compute = Default::default();
-
-                cmd.timestamps.with(|raw, _inner| {
-                    result.ts_start = raw.start.load(Ordering::Relaxed);
-                    result.ts_end = raw.end.load(Ordering::Relaxed);
-                });
-
-                if let Some(err) = error {
-                    result.info = err.into();
-                } else {
-                    result.info.status = uapi::drm_asahi_status_DRM_ASAHI_STATUS_COMPLETE;
-                }
-
-                rw.write(result);
             }
 
             fence.command_complete();

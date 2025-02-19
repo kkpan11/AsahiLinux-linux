@@ -10,7 +10,7 @@
 use crate::debug::*;
 use crate::driver::AsahiDevice;
 use crate::{
-    alloc, buffer, driver, gem, hw, mmu, module_parameters, queue,
+    alloc, buffer, driver, gem, mmu, module_parameters, queue,
     util::{align, align_down, RangeExt},
 };
 use core::mem::MaybeUninit;
@@ -27,7 +27,6 @@ use kernel::{dma_fence, drm, uapi, xarray};
 const DEBUG_CLASS: DebugFlags = DebugFlags::File;
 
 const MAX_COMMANDS_PER_SUBMISSION: u32 = 64;
-pub(crate) const MAX_COMMANDS_IN_FLIGHT: u32 = 1024;
 
 /// A client instance of an `mmu::Vm` address space.
 struct Vm {
@@ -73,11 +72,6 @@ pub(crate) struct SyncItem {
 
 impl SyncItem {
     fn parse_one(file: &DrmFile, data: uapi::drm_asahi_sync, out: bool) -> Result<SyncItem> {
-        if data.extensions != 0 {
-            cls_pr_debug!(Errors, "drm_asahi_sync extension unexpected\n");
-            return Err(EINVAL);
-        }
-
         match data.sync_type {
             uapi::drm_asahi_sync_type_DRM_ASAHI_SYNC_SYNCOBJ => {
                 if data.timeline_value != 0 {
@@ -240,7 +234,7 @@ impl File {
 
         let gpu = &dev_data.gpu;
 
-        if data.extensions != 0 || data.param_group != 0 || data.pad != 0 {
+        if data.param_group != 0 || data.pad != 0 {
             cls_pr_debug!(Errors, "get_params: Invalid arguments\n");
             return Err(EINVAL);
         }
@@ -250,14 +244,7 @@ impl File {
         }
 
         let mut params = uapi::drm_asahi_params_global {
-            unstable_uabi_version: uapi::DRM_ASAHI_UNSTABLE_UABI_VERSION,
-            pad0: 0,
-
-            feat_compat: gpu.get_cfg().gpu_feat_compat
-                | hw::feat::compat::GETTIME
-                | hw::feat::compat::USER_TIMESTAMPS
-                | hw::feat::compat::SINGLE_PAGE_MAP,
-            feat_incompat: gpu.get_cfg().gpu_feat_incompat,
+            features: 0,
 
             gpu_generation: gpu.get_dyncfg().id.gpu_gen as u32,
             gpu_variant: gpu.get_dyncfg().id.gpu_variant as u32,
@@ -269,29 +256,20 @@ impl File {
             num_cores_per_cluster: gpu.get_dyncfg().id.num_cores,
             num_frags_per_cluster: gpu.get_dyncfg().id.num_frags,
             num_gps_per_cluster: gpu.get_dyncfg().id.num_gps,
-            num_cores_total_active: gpu.get_dyncfg().id.total_active_cores,
             core_masks: [0; uapi::DRM_ASAHI_MAX_CLUSTERS as usize],
 
             vm_page_size: mmu::UAT_PGSZ as u32,
-            pad1: 0,
             vm_user_start: VM_USER_RANGE.start,
             vm_user_end: VM_USER_RANGE.end,
-            vm_usc_start: 0, // Arbitrary
-            vm_usc_end: 0,
             vm_kernel_min_size: VM_KERNEL_MIN_SIZE,
 
-            max_syncs_per_submission: 0,
             max_commands_per_submission: MAX_COMMANDS_PER_SUBMISSION,
-            max_commands_in_flight: MAX_COMMANDS_IN_FLIGHT,
             max_attachments: crate::microseq::MAX_ATTACHMENTS as u32,
 
-            timer_frequency_hz: gpu.get_cfg().base_clock_hz,
+            timer_frequency_hz: gpu.get_cfg().base_clock_hz as u64,
             min_frequency_khz: gpu.get_dyncfg().pwr.min_frequency_khz(),
             max_frequency_khz: gpu.get_dyncfg().pwr.max_frequency_khz(),
             max_power_mw: gpu.get_dyncfg().pwr.max_power_mw,
-
-            result_render_size: core::mem::size_of::<uapi::drm_asahi_result_render>() as u32,
-            result_compute_size: core::mem::size_of::<uapi::drm_asahi_result_compute>() as u32,
 
             firmware_version: [0; 4],
 
@@ -307,7 +285,7 @@ impl File {
         }
 
         if *module_parameters::fault_control.get() == 0xb {
-            params.feat_compat |= hw::feat::compat::SOFT_FAULTS;
+            params.features |= uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_SOFT_FAULTS as u64;
         }
 
         let size = core::mem::size_of::<uapi::drm_asahi_params_global>().min(data.size.try_into()?);
@@ -330,11 +308,6 @@ impl File {
         data: &mut uapi::drm_asahi_vm_create,
         file: &DrmFile,
     ) -> Result<u32> {
-        if data.extensions != 0 {
-            cls_pr_debug!(Errors, "vm_create: Unexpected extensions\n");
-            return Err(EINVAL);
-        }
-
         let kernel_range = data.kernel_start..data.kernel_end;
 
         // Validate requested kernel range
@@ -433,11 +406,6 @@ impl File {
         data: &mut uapi::drm_asahi_vm_destroy,
         file: &DrmFile,
     ) -> Result<u32> {
-        if data.extensions != 0 {
-            cls_pr_debug!(Errors, "vm_destroy: Unexpected extensions\n");
-            return Err(EINVAL);
-        }
-
         if file.inner().vms().remove(data.vm_id as usize).is_none() {
             Err(ENOENT)
         } else {
@@ -459,8 +427,7 @@ impl File {
             data.size
         );
 
-        if data.extensions != 0
-            || (data.flags & !(uapi::ASAHI_GEM_WRITEBACK | uapi::ASAHI_GEM_VM_PRIVATE)) != 0
+        if (data.flags & !(uapi::ASAHI_GEM_WRITEBACK | uapi::ASAHI_GEM_VM_PRIVATE)) != 0
             || (data.flags & uapi::ASAHI_GEM_VM_PRIVATE == 0 && data.vm_id != 0)
         {
             cls_pr_debug!(Errors, "gem_create: Invalid arguments\n");
@@ -511,8 +478,8 @@ impl File {
             data.handle
         );
 
-        if data.extensions != 0 || data.flags != 0 {
-            cls_pr_debug!(Errors, "gem_mmap_offset: Unexpected extensions or flags\n");
+        if data.flags != 0 {
+            cls_pr_debug!(Errors, "gem_mmap_offset: Unexpected flags\n");
             return Err(EINVAL);
         }
 
@@ -540,11 +507,6 @@ impl File {
             data.range,
             data.addr
         );
-
-        if data.extensions != 0 {
-            cls_pr_debug!(Errors, "gem_bind: Unexpected extensions\n");
-            return Err(EINVAL);
-        }
 
         match data.op {
             uapi::drm_asahi_bind_op_ASAHI_BIND_OP_BIND => Self::do_gem_bind(device, data, file),
@@ -787,11 +749,6 @@ impl File {
             data.object_handle
         );
 
-        if data.extensions != 0 {
-            cls_pr_debug!(Errors, "gem_bind_object: Unexpected extensions\n");
-            return Err(EINVAL);
-        }
-
         if data.pad != 0 {
             cls_pr_debug!(Errors, "gem_bind_object: Unexpected pad\n");
             return Err(EINVAL);
@@ -921,13 +878,11 @@ impl File {
             data.flags,
         );
 
-        if data.extensions != 0
-            || data.flags != 0
+        if data.flags != 0
             || data.priority > 3
             || data.queue_caps == 0
             || (data.queue_caps
                 & !(uapi::drm_asahi_queue_cap_DRM_ASAHI_QUEUE_CAP_RENDER
-                    | uapi::drm_asahi_queue_cap_DRM_ASAHI_QUEUE_CAP_BLIT
                     | uapi::drm_asahi_queue_cap_DRM_ASAHI_QUEUE_CAP_COMPUTE))
                 != 0
         {
@@ -965,11 +920,6 @@ impl File {
         data: &mut uapi::drm_asahi_queue_destroy,
         file: &DrmFile,
     ) -> Result<u32> {
-        if data.extensions != 0 {
-            cls_pr_debug!(Errors, "queue_destroy: Unexpected extensions\n");
-            return Err(EINVAL);
-        }
-
         if file
             .inner()
             .queues()
@@ -990,11 +940,6 @@ impl File {
         file: &DrmFile,
     ) -> Result<u32> {
         debug::update_debug_flags();
-
-        if data.extensions != 0 {
-            cls_pr_debug!(Errors, "submit: Unexpected extensions\n");
-            return Err(EINVAL);
-        }
 
         if data.flags != 0 {
             cls_pr_debug!(Errors, "submit: Unexpected flags {:#x}\n", data.flags);
@@ -1048,20 +993,6 @@ impl File {
         );
         let out_syncs = SyncItem::parse_array(file, data.out_syncs, data.out_sync_count, true)?;
 
-        let result_buf = if data.result_handle != 0 {
-            mod_dev_dbg!(
-                device,
-                "[File {} Queue {}]: IOCTL: submit({}): Looking up result_handle {}\n",
-                file.inner().id,
-                data.queue_id,
-                id,
-                data.result_handle
-            );
-            Some(gem::lookup_handle(file, data.result_handle)?)
-        } else {
-            None
-        };
-
         mod_dev_dbg!(
             device,
             "[File {} Queue {}]: IOCTL: submit({}): Parsing commands\n",
@@ -1093,7 +1024,7 @@ impl File {
 
         let ret = queue
             .lock()
-            .submit(id, in_syncs, out_syncs, result_buf, commands, objects);
+            .submit(id, in_syncs, out_syncs, commands, objects);
 
         match ret {
             Err(ERESTARTSYS) => Err(ERESTARTSYS),
@@ -1119,8 +1050,8 @@ impl File {
         data: &mut uapi::drm_asahi_get_time,
         _file: &DrmFile,
     ) -> Result<u32> {
-        if data.extensions != 0 || data.flags != 0 {
-            cls_pr_debug!(Errors, "get_time: Unexpected extensions or flags\n");
+        if data.flags != 0 {
+            cls_pr_debug!(Errors, "get_time: Unexpected flags\n");
             return Err(EINVAL);
         }
 

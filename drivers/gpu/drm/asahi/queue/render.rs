@@ -37,38 +37,6 @@ const DEBUG_CLASS: DebugFlags = DebugFlags::Render;
 /// cluster.
 const TILECTL_DISABLE_CLUSTERING: u32 = 1u32 << 0;
 
-struct RenderResult {
-    result: uapi::drm_asahi_result_render,
-    vtx_complete: bool,
-    frag_complete: bool,
-    vtx_error: Option<workqueue::WorkError>,
-    frag_error: Option<workqueue::WorkError>,
-    writer: super::ResultWriter,
-}
-
-impl RenderResult {
-    fn commit(&mut self) {
-        if !self.vtx_complete || !self.frag_complete {
-            return;
-        }
-
-        let mut error = self.vtx_error.take();
-        if let Some(frag_error) = self.frag_error.take() {
-            if error.is_none() || error == Some(WorkError::Killed) {
-                error = Some(frag_error);
-            }
-        }
-
-        if let Some(err) = error {
-            self.result.info = err.into();
-        } else {
-            self.result.info.status = uapi::drm_asahi_status_DRM_ASAHI_STATUS_COMPLETE;
-        }
-
-        self.writer.write(self.result);
-    }
-}
-
 #[versions(AGX)]
 impl super::QueueInner::ver {
     /// Get the appropriate tiling parameters for a given userspace command buffer.
@@ -76,14 +44,9 @@ impl super::QueueInner::ver {
         cmdbuf: &uapi::drm_asahi_cmd_render,
         num_clusters: u32,
     ) -> Result<buffer::TileInfo> {
-        let width: u32 = cmdbuf.fb_width;
-        let height: u32 = cmdbuf.fb_height;
-        let layers: u32 = cmdbuf.layers;
-
-        if width > 65536 || height > 65536 {
-            cls_pr_debug!(Errors, "Framebuffer too large ({} x {})\n", width, height);
-            return Err(EINVAL);
-        }
+        let width: u32 = cmdbuf.width as u32;
+        let height: u32 = cmdbuf.height as u32;
+        let layers: u32 = cmdbuf.layers as u32;
 
         if layers == 0 || layers > 2048 {
             cls_pr_debug!(Errors, "Layer count invalid ({})\n", layers);
@@ -102,8 +65,8 @@ impl super::QueueInner::ver {
         let tile_width = 32u32;
         let tile_height = 32u32;
 
-        let utile_width = cmdbuf.utile_width;
-        let utile_height = cmdbuf.utile_height;
+        let utile_width = cmdbuf.utile_width as u32;
+        let utile_height = cmdbuf.utile_height as u32;
 
         match (utile_width, utile_height) {
             (32, 32) | (32, 16) | (16, 16) => (),
@@ -187,7 +150,7 @@ impl super::QueueInner::ver {
             tpc_size,
             meta1_layer_stride,
             #[ver(G < G14X)]
-            meta1_blocks: meta1_layer_stride * cmdbuf.layers,
+            meta1_blocks: meta1_layer_stride * (cmdbuf.layers as u32),
             #[ver(G >= G14X)]
             meta1_blocks: meta1_layer_stride,
             layermeta_size: if layers > 1 { 0x100 } else { 0 },
@@ -209,7 +172,7 @@ impl super::QueueInner::ver {
                 } else {
                     0x8000
                 },
-                helper_cfg: cmdbuf.vertex_helper_cfg,
+                helper_cfg: cmdbuf.vertex_helper.cfg,
                 __pad: Default::default(),
             },
         })
@@ -220,7 +183,6 @@ impl super::QueueInner::ver {
         &self,
         job: &mut Job<super::QueueJob::ver>,
         cmd: &uapi::drm_asahi_command,
-        result_writer: Option<super::ResultWriter>,
         objects: Pin<&xarray::XArray<KBox<file::Object>>>,
         id: u64,
         flush_stamps: bool,
@@ -249,122 +211,34 @@ impl super::QueueInner::ver {
         })?;
 
         if cmdbuf.flags
-            & !(uapi::ASAHI_RENDER_NO_CLEAR_PIPELINE_TEXTURES
-                | uapi::ASAHI_RENDER_SET_WHEN_RELOADING_Z_OR_S
-                | uapi::ASAHI_RENDER_VERTEX_SPILLS
+            & !(uapi::ASAHI_RENDER_VERTEX_SPILLS
                 | uapi::ASAHI_RENDER_PROCESS_EMPTY_TILES
                 | uapi::ASAHI_RENDER_NO_VERTEX_CLUSTERING
-                | uapi::ASAHI_RENDER_MSAA_ZS) as u64
+                | uapi::ASAHI_RENDER_DBIAS_IS_INT) as u64
             != 0
         {
             cls_pr_debug!(Errors, "Invalid flags ({:#x})\n", cmdbuf.flags);
             return Err(EINVAL);
         }
 
-        let mut vtx_user_timestamps: fw::job::UserTimestamps = Default::default();
-        let mut frg_user_timestamps: fw::job::UserTimestamps = Default::default();
-
-        if cmdbuf.fb_width == 0
-            || cmdbuf.fb_height == 0
-            || cmdbuf.fb_width > 16384
-            || cmdbuf.fb_height > 16384
+        if cmdbuf.width == 0 || cmdbuf.height == 0 || cmdbuf.width > 16384 || cmdbuf.height > 16384
         {
             cls_pr_debug!(
                 Errors,
                 "Invalid dimensions ({}x{})\n",
-                cmdbuf.fb_width,
-                cmdbuf.fb_height
+                cmdbuf.width,
+                cmdbuf.height
             );
             return Err(EINVAL);
         }
 
-        let mut unks: uapi::drm_asahi_cmd_render_unknowns = Default::default();
+        let mut vtx_user_timestamps: fw::job::UserTimestamps = Default::default();
+        let mut frg_user_timestamps: fw::job::UserTimestamps = Default::default();
 
-        let mut ext_ptr = cmdbuf.extensions;
-        while ext_ptr != 0 {
-            // SAFETY: There is a double read from userspace here, but there is no TOCTOU
-            // issue since at worst the extension parse below will read garbage, and
-            // we do not trust any fields anyway.
-            let ext_type = UserSlice::new(ext_ptr as UserPtr, 4)
-                .reader()
-                .read::<u32>()?;
-
-            match ext_type {
-                uapi::ASAHI_RENDER_EXT_UNKNOWNS => {
-                    if !debug_enabled(debug::DebugFlags::AllowUnknownOverrides) {
-                        cls_pr_debug!(Errors, "Overrides not enabled\n");
-                        return Err(EINVAL);
-                    }
-                    // SAFETY: See above
-                    let mut ext_reader = UserSlice::new(
-                        ext_ptr as UserPtr,
-                        core::mem::size_of::<uapi::drm_asahi_cmd_render_unknowns>(),
-                    )
-                    .reader();
-                    // SAFETY: The output buffer is valid and of the correct size, and all bit
-                    // patterns are valid.
-                    ext_reader.read_raw(unsafe {
-                        core::slice::from_raw_parts_mut(
-                            &mut unks as *mut _ as *mut MaybeUninit<u8>,
-                            core::mem::size_of::<uapi::drm_asahi_cmd_render_unknowns>(),
-                        )
-                    })?;
-
-                    ext_ptr = unks.next;
-                }
-                uapi::ASAHI_RENDER_EXT_TIMESTAMPS => {
-                    let mut ext_user_timestamps: uapi::drm_asahi_cmd_render_user_timestamps =
-                        Default::default();
-
-                    // SAFETY: See above
-                    let mut ext_reader = UserSlice::new(
-                        ext_ptr as UserPtr,
-                        core::mem::size_of::<uapi::drm_asahi_cmd_render_user_timestamps>(),
-                    )
-                    .reader();
-                    // SAFETY: The output buffer is valid and of the correct size, and all bit
-                    // patterns are valid.
-                    ext_reader.read_raw(unsafe {
-                        core::slice::from_raw_parts_mut(
-                            &mut ext_user_timestamps as *mut _ as *mut MaybeUninit<u8>,
-                            core::mem::size_of::<uapi::drm_asahi_cmd_render_user_timestamps>(),
-                        )
-                    })?;
-
-                    vtx_user_timestamps.start = common::get_timestamp_object(
-                        objects,
-                        ext_user_timestamps.vtx_start_handle,
-                        ext_user_timestamps.vtx_start_offset,
-                    )?;
-                    vtx_user_timestamps.end = common::get_timestamp_object(
-                        objects,
-                        ext_user_timestamps.vtx_end_handle,
-                        ext_user_timestamps.vtx_end_offset,
-                    )?;
-                    frg_user_timestamps.start = common::get_timestamp_object(
-                        objects,
-                        ext_user_timestamps.frg_start_handle,
-                        ext_user_timestamps.frg_start_offset,
-                    )?;
-                    frg_user_timestamps.end = common::get_timestamp_object(
-                        objects,
-                        ext_user_timestamps.frg_end_handle,
-                        ext_user_timestamps.frg_end_offset,
-                    )?;
-
-                    ext_ptr = ext_user_timestamps.next;
-                }
-                _ => {
-                    cls_pr_debug!(Errors, "Unknown extension {}\n", ext_type);
-                    return Err(EINVAL);
-                }
-            }
-        }
-
-        if unks.pad != 0 {
-            cls_pr_debug!(Errors, "Nonzero unks.pad: {}\n", unks.pad);
-            return Err(EINVAL);
-        }
+        vtx_user_timestamps.start = common::get_timestamp_object(objects, cmdbuf.ts_vtx.start)?;
+        vtx_user_timestamps.end = common::get_timestamp_object(objects, cmdbuf.ts_vtx.end)?;
+        frg_user_timestamps.start = common::get_timestamp_object(objects, cmdbuf.ts_frag.start)?;
+        frg_user_timestamps.end = common::get_timestamp_object(objects, cmdbuf.ts_frag.end)?;
 
         let data = unsafe { &<KBox<AsahiDriver>>::borrow(self.dev.as_ref().get_drvdata()).data };
         let gpu = match data.gpu.as_any().downcast_ref::<gpu::GpuManager::ver>() {
@@ -388,7 +262,7 @@ impl super::QueueInner::ver {
         }
 
         #[ver(G != G14)]
-        let mut tiling_control = {
+        let tiling_control = {
             let render_cfg = gpu.get_cfg().render;
             let mut tiling_control = render_cfg.tiling_control;
 
@@ -436,8 +310,8 @@ impl super::QueueInner::ver {
                 id,
                 tile_info.min_tvb_blocks * buffer::BLOCK_SIZE,
                 tile_info.min_tvb_blocks,
-                cmdbuf.fb_width,
-                cmdbuf.fb_height
+                cmdbuf.width,
+                cmdbuf.height
             );
         }
 
@@ -515,7 +389,7 @@ impl super::QueueInner::ver {
             GFP_KERNEL,
         )?;
 
-        let unk1 = unks.flags & uapi::ASAHI_RENDER_UNK_UNK1 as u64 != 0;
+        let unk1 = false;
 
         let mut tile_config: u64 = 0;
         if !unk1 {
@@ -528,9 +402,7 @@ impl super::QueueInner::ver {
             tile_config |= 0x10000;
         }
 
-        let mut utile_config =
-            ((tile_info.utile_width / 16) << 12) | ((tile_info.utile_height / 16) << 14);
-        utile_config |= match cmdbuf.samples {
+        let samples_log2 = match cmdbuf.samples {
             1 => 0,
             2 => 1,
             4 => 2,
@@ -540,38 +412,25 @@ impl super::QueueInner::ver {
             }
         };
 
+        let utile_config = ((tile_info.utile_width / 16) << 12)
+            | ((tile_info.utile_height / 16) << 14)
+            | samples_log2;
+
+        // Calculate the number of 2KiB blocks to allocate per utile. This is
+        // just a bit of dimensional analysis.
+        let pixels_per_utile: u32 = (cmdbuf.utile_width as u32) * (cmdbuf.utile_height as u32);
+        let samples_per_utile: u32 = pixels_per_utile << samples_log2;
+        let bytes_per_utile: u32 = (cmdbuf.sample_size as u32) * samples_per_utile;
+        let bytes_per_block: u32 = 2048;
+        let blocks_per_utile: u32 = bytes_per_utile.div_ceil(bytes_per_block);
+
         #[ver(G >= G14X)]
-        let mut frg_tilecfg = 0x0000000_00036011
+        let frg_tilecfg = 0x0000000_00036011
             | (((tile_info.tiles_x - 1) as u64) << 44)
             | (((tile_info.tiles_y - 1) as u64) << 53)
             | (if unk1 { 0 } else { 0x20_00000000 })
             | (if cmdbuf.layers > 1 { 0x1_00000000 } else { 0 })
             | ((utile_config as u64 & 0xf000) << 28);
-
-        let frag_result = result_writer
-            .map(|writer| {
-                let mut result = RenderResult {
-                    result: Default::default(),
-                    vtx_complete: false,
-                    frag_complete: false,
-                    vtx_error: None,
-                    frag_error: None,
-                    writer,
-                };
-
-                if tvb_autogrown {
-                    result.result.flags |= uapi::DRM_ASAHI_RESULT_RENDER_TVB_GROW_OVF as u64;
-                }
-                if tvb_grown {
-                    result.result.flags |= uapi::DRM_ASAHI_RESULT_RENDER_TVB_GROW_MIN as u64;
-                }
-                result.result.tvb_size_bytes = buffer.size() as u64;
-
-                Arc::pin_init(new_mutex!(result, "render result"), GFP_KERNEL)
-            })
-            .transpose()?;
-
-        let vtx_result = frag_result.clone();
 
         // TODO: check
         #[ver(V >= V13_0B4)]
@@ -581,91 +440,40 @@ impl super::QueueInner::ver {
 
         // Unknowns handling
 
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_TILE_CONFIG as u64 != 0 {
-            tile_config = unks.tile_config;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_UTILE_CONFIG as u64 != 0 {
-            utile_config = unks.utile_config as u32;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_AUX_FB_UNK as u64 == 0 {
-            unks.aux_fb_unk = 0x100000;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_G14_UNK as u64 == 0 {
-            #[ver(G >= G14)]
-            unks.g14_unk = 0x4040404;
-            #[ver(G < G14)]
-            unks.g14_unk = 0;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_FRG_UNK_140 as u64 == 0 {
-            unks.frg_unk_140 = 0x8c60;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_FRG_UNK_158 as u64 == 0 {
-            unks.frg_unk_158 = 0x1c;
-        }
+        #[ver(G >= G14)]
+        let g14_unk = 0x4040404;
+        #[ver(G < G14)]
+        let g14_unk = 0;
+        #[ver(G < G14X)]
+        let frg_unk_140 = 0x8c60;
+        let frg_unk_158 = 0x1c;
+        #[ver(G >= G14)]
+        let load_bgobjvals = cmdbuf.isp_bgobjvals as u64;
+        #[ver(G < G14)]
+        let load_bgobjvals = cmdbuf.isp_bgobjvals as u64 | 0x400;
+        let reload_zlsctrl = cmdbuf.zls_ctrl;
+        let iogpu_unk54 = 0x3a0012006b0003;
+        let iogpu_unk56 = 1;
+        #[ver(G < G14)]
+        let tiling_control_2 = 0;
         #[ver(G >= G14X)]
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_FRG_TILECFG as u64 != 0 {
-            frg_tilecfg = unks.frg_tilecfg;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_LOAD_BGOBJVALS as u64 == 0 {
-            unks.load_bgobjvals = cmdbuf.isp_bgobjvals.into();
-            #[ver(G < G14)]
-            unks.load_bgobjvals |= 0x400;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_FRG_UNK_38 as u64 == 0 {
-            unks.frg_unk_38 = 0;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_FRG_UNK_3C as u64 == 0 {
-            unks.frg_unk_3c = 1;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_RELOAD_ZLSCTRL as u64 == 0 {
-            unks.reload_zlsctrl = cmdbuf.zls_ctrl;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_UNK_BUF_10 as u64 == 0 {
-            #[ver(G < G14X)]
-            unks.unk_buf_10 = 1;
-            #[ver(G >= G14X)]
-            unks.unk_buf_10 = 0;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_FRG_UNK_MASK as u64 == 0 {
-            unks.frg_unk_mask = 0xffffffff;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_IOGPU_UNK54 == 0 {
-            unks.iogpu_unk54 = 0x3a0012006b0003;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_IOGPU_UNK56 == 0 {
-            unks.iogpu_unk56 = 1;
-        }
-        #[ver(G != G14)]
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_TILING_CONTROL != 0 {
-            tiling_control = unks.tiling_control as u32;
-        }
-        #[ver(G != G14)]
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_TILING_CONTROL_2 == 0 {
-            #[ver(G < G14X)]
-            unks.tiling_control_2 = 0;
-            #[ver(G >= G14X)]
-            unks.tiling_control_2 = 4;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_VTX_UNK_F0 == 0 {
-            unks.vtx_unk_f0 = 0x1c;
-            #[ver(G < G14X)]
-            unks.vtx_unk_f0 += align(tile_info.meta1_blocks, 4) as u64;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_VTX_UNK_F8 == 0 {
-            unks.vtx_unk_f8 = 0x8c60;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_VTX_UNK_118 == 0 {
-            unks.vtx_unk_118 = 0x1c;
-        }
-        if unks.flags & uapi::ASAHI_RENDER_UNK_SET_VTX_UNK_MASK == 0 {
-            unks.vtx_unk_mask = 0xffffffff;
-        }
+        let tiling_control_2 = 4;
+        #[ver(G >= G14X)]
+        let vtx_unk_f0 = 0x1c;
+        #[ver(G < G14)]
+        let vtx_unk_f0 = 0x1c + (align(tile_info.meta1_blocks, 4) as u64);
+        let vtx_unk_118 = 0x1c;
+
+        // ASAHI_RENDER_DBIAS_IS_INT chosen to match hardware bit.
+        let isp_ctl = 0xc000u32 | ((cmdbuf.flags & uapi::ASAHI_RENDER_DBIAS_IS_INT as u64) as u32);
+
+        // Always allow preemption at the UAPI level
+        let no_preemption = false;
 
         mod_dev_dbg!(self.dev, "[Submission {}] Create Frag\n", id);
         let frag = GpuObject::new_init_prealloc(
             kalloc.gpu_ro.alloc_object()?,
             |ptr: GpuWeakPointer<fw::fragment::RunFragment::ver>| {
-                let has_result = frag_result.is_some();
                 let scene = scene.clone();
                 let notifier = notifier.clone();
                 let vm_bind = vm_bind.clone();
@@ -725,7 +533,7 @@ impl super::QueueInner::ver {
                             notifier_buf: inner_weak_ptr!(notifier.weak_pointer(), state.unk_buf),
                         })?;
 
-                        if has_result || frg_user_timestamps.any() {
+                        if frg_user_timestamps.any() {
                             builder.add(microseq::Timestamp::ver {
                                 header: microseq::op::Timestamp::new(true),
                                 command_time: inner_weak_ptr!(ptr, command_time),
@@ -749,7 +557,7 @@ impl super::QueueInner::ver {
                             header: microseq::op::WaitForIdle2::HEADER,
                         })?;
 
-                        if has_result || frg_user_timestamps.any() {
+                        if frg_user_timestamps.any() {
                             builder.add(microseq::Timestamp::ver {
                                 header: microseq::op::Timestamp::new(false),
                                 command_time: inner_weak_ptr!(ptr, command_time),
@@ -815,12 +623,12 @@ impl super::QueueInner::ver {
             |inner, _ptr| {
                 let vm_slot = vm_bind.slot();
                 let aux_fb_info = fw::fragment::raw::AuxFBInfo::ver {
-                    iogpu_unk_214: cmdbuf.iogpu_unk_214,
+                    isp_ctl: isp_ctl,
                     unk2: 0,
-                    width: cmdbuf.fb_width,
-                    height: cmdbuf.fb_height,
+                    width: cmdbuf.width as u32,
+                    height: cmdbuf.height as u32,
                     #[ver(V >= V13_0B4)]
-                    unk3: U64(unks.aux_fb_unk),
+                    unk3: U64(0x100000),
                 };
 
                 try_init!(fw::fragment::raw::RunFragment::ver {
@@ -837,13 +645,13 @@ impl super::QueueInner::ver {
                     unk_buffer_buf: inner.scene.kernel_buffer_pointer(),
                     tvb_tilemap: inner.scene.tvb_tilemap_pointer(),
                     ppp_multisamplectl: U64(cmdbuf.ppp_multisamplectl),
-                    samples: cmdbuf.samples,
+                    samples: cmdbuf.samples as u32,
                     tiles_per_mtile_y: tile_info.tiles_per_mtile_y as u16,
                     tiles_per_mtile_x: tile_info.tiles_per_mtile_x as u16,
                     unk_50: U64(0),
                     unk_58: U64(0),
-                    merge_upper_x: F32::from_bits(cmdbuf.merge_upper_x),
-                    merge_upper_y: F32::from_bits(cmdbuf.merge_upper_y),
+                    merge_upper_x: F32::from_bits(cmdbuf.isp_merge_upper_x),
+                    merge_upper_y: F32::from_bits(cmdbuf.isp_merge_upper_y),
                     unk_68: U64(0),
                     tile_count: U64(tile_info.tiles as u64),
                     #[ver(G < G14X)]
@@ -851,38 +659,38 @@ impl super::QueueInner::ver {
                         utile_config,
                         unk_4: 0,
                         clear_pipeline: fw::fragment::raw::ClearPipelineBinding {
-                            pipeline_bind: U64(cmdbuf.load_pipeline_bind as u64),
-                            address: U64(cmdbuf.load_pipeline as u64),
+                            pipeline_bind: U64(cmdbuf.bg.rsrc_spec as u64),
+                            address: U64(cmdbuf.bg.usc as u64),
                         },
                         ppp_multisamplectl: U64(cmdbuf.ppp_multisamplectl),
-                        scissor_array: U64(cmdbuf.scissor_array),
-                        depth_bias_array: U64(cmdbuf.depth_bias_array),
+                        scissor_array: U64(cmdbuf.isp_scissor_base),
+                        depth_bias_array: U64(cmdbuf.isp_dbias_base),
                         aux_fb_info,
-                        depth_dimensions: U64(cmdbuf.depth_dimensions as u64),
-                        visibility_result_buffer: U64(cmdbuf.visibility_result_buffer),
+                        depth_dimensions: U64(cmdbuf.isp_zls_pixels as u64),
+                        visibility_result_buffer: U64(cmdbuf.isp_oclqry_base),
                         zls_ctrl: U64(cmdbuf.zls_ctrl),
                         #[ver(G >= G14)]
-                        unk_58_g14_0: U64(unks.g14_unk),
+                        unk_58_g14_0: U64(g14_unk),
                         #[ver(G >= G14)]
                         unk_58_g14_8: U64(0),
-                        depth_buffer_ptr1: U64(cmdbuf.depth_buffer_load),
-                        depth_buffer_ptr2: U64(cmdbuf.depth_buffer_store),
-                        stencil_buffer_ptr1: U64(cmdbuf.stencil_buffer_load),
-                        stencil_buffer_ptr2: U64(cmdbuf.stencil_buffer_store),
+                        depth_buffer_ptr1: U64(cmdbuf.depth.load),
+                        depth_buffer_ptr2: U64(cmdbuf.depth.store),
+                        stencil_buffer_ptr1: U64(cmdbuf.stencil.load),
+                        stencil_buffer_ptr2: U64(cmdbuf.stencil.store),
                         #[ver(G >= G14)]
                         unk_68_g14_0: Default::default(),
-                        depth_buffer_stride1: U64(cmdbuf.depth_buffer_load_stride),
-                        depth_buffer_stride2: U64(cmdbuf.depth_buffer_store_stride),
-                        stencil_buffer_stride1: U64(cmdbuf.stencil_buffer_load_stride),
-                        stencil_buffer_stride2: U64(cmdbuf.stencil_buffer_store_stride),
-                        depth_meta_buffer_ptr1: U64(cmdbuf.depth_meta_buffer_load),
-                        depth_meta_buffer_stride1: U64(cmdbuf.depth_meta_buffer_load_stride),
-                        depth_meta_buffer_ptr2: U64(cmdbuf.depth_meta_buffer_store),
-                        depth_meta_buffer_stride2: U64(cmdbuf.depth_meta_buffer_store_stride),
-                        stencil_meta_buffer_ptr1: U64(cmdbuf.stencil_meta_buffer_load),
-                        stencil_meta_buffer_stride1: U64(cmdbuf.stencil_meta_buffer_load_stride),
-                        stencil_meta_buffer_ptr2: U64(cmdbuf.stencil_meta_buffer_store),
-                        stencil_meta_buffer_stride2: U64(cmdbuf.stencil_meta_buffer_store_stride),
+                        depth_buffer_stride1: U64(cmdbuf.depth.load_stride as u64),
+                        depth_buffer_stride2: U64(cmdbuf.depth.store_stride as u64),
+                        stencil_buffer_stride1: U64(cmdbuf.stencil.load_stride as u64),
+                        stencil_buffer_stride2: U64(cmdbuf.stencil.store_stride as u64),
+                        depth_meta_buffer_ptr1: U64(cmdbuf.depth.comp_load),
+                        depth_meta_buffer_stride1: U64(cmdbuf.depth.comp_load_stride as u64),
+                        depth_meta_buffer_ptr2: U64(cmdbuf.depth.comp_store),
+                        depth_meta_buffer_stride2: U64(cmdbuf.depth.comp_store_stride as u64),
+                        stencil_meta_buffer_ptr1: U64(cmdbuf.stencil.comp_load),
+                        stencil_meta_buffer_stride1: U64(cmdbuf.stencil.comp_load_stride as u64),
+                        stencil_meta_buffer_ptr2: U64(cmdbuf.stencil.comp_store),
+                        stencil_meta_buffer_stride2: U64(cmdbuf.stencil.comp_store_stride as u64),
                         tvb_tilemap: inner.scene.tvb_tilemap_pointer(),
                         tvb_layermeta: inner.scene.tvb_layermeta_pointer(),
                         mtile_stride_dwords: U64((4 * tile_info.params.rgn_size as u64) << 24),
@@ -890,12 +698,12 @@ impl super::QueueInner::ver {
                         tile_config: U64(tile_config),
                         aux_fb: inner.aux_fb.gpu_pointer(),
                         unk_108: Default::default(),
-                        pipeline_base: U64(cmdbuf.fragment_usc_base),
-                        unk_140: U64(unks.frg_unk_140),
-                        helper_program: cmdbuf.fragment_helper_program,
+                        pipeline_base: U64(cmdbuf.usc_base), // frag
+                        unk_140: U64(frg_unk_140),
+                        helper_program: cmdbuf.fragment_helper.binary,
                         unk_14c: 0,
-                        helper_arg: U64(cmdbuf.fragment_helper_arg),
-                        unk_158: U64(unks.frg_unk_158),
+                        helper_arg: U64(cmdbuf.fragment_helper.data),
+                        unk_158: U64(frg_unk_158),
                         unk_160: U64(0),
                         __pad: Default::default(),
                         #[ver(V < V13_0B4)]
@@ -903,24 +711,24 @@ impl super::QueueInner::ver {
                     }),
                     #[ver(G < G14X)]
                     job_params2 <- try_init!(fw::fragment::raw::JobParameters2 {
-                        store_pipeline_bind: cmdbuf.store_pipeline_bind,
-                        store_pipeline_addr: cmdbuf.store_pipeline,
+                        store_pipeline_bind: cmdbuf.eot.rsrc_spec,
+                        store_pipeline_addr: cmdbuf.eot.usc,
                         unk_8: 0x0,
                         unk_c: 0x0,
-                        merge_upper_x: F32::from_bits(cmdbuf.merge_upper_x),
-                        merge_upper_y: F32::from_bits(cmdbuf.merge_upper_y),
+                        merge_upper_x: F32::from_bits(cmdbuf.isp_merge_upper_x),
+                        merge_upper_y: F32::from_bits(cmdbuf.isp_merge_upper_y),
                         unk_18: U64(0x0),
                         utiles_per_mtile_y: tile_info.utiles_per_mtile_y as u16,
                         utiles_per_mtile_x: tile_info.utiles_per_mtile_x as u16,
                         unk_24: 0x0,
                         tile_counts: ((tile_info.tiles_y - 1) << 12) | (tile_info.tiles_x - 1),
-                        tib_blocks: cmdbuf.tib_blocks,
+                        tib_blocks: blocks_per_utile,
                         isp_bgobjdepth: cmdbuf.isp_bgobjdepth,
                         // TODO: does this flag need to be exposed to userspace?
-                        isp_bgobjvals: unks.load_bgobjvals as u32,
-                        unk_38: unks.frg_unk_38 as u32,
-                        unk_3c: unks.frg_unk_3c as u32,
-                        helper_cfg: cmdbuf.fragment_helper_cfg,
+                        isp_bgobjvals: load_bgobjvals as u32,
+                        unk_38: 0x0,
+                        unk_3c: 0x1,
+                        helper_cfg: cmdbuf.fragment_helper.cfg,
                         __pad: Default::default(),
                     }),
                     #[ver(G >= G14X)]
@@ -929,12 +737,12 @@ impl super::QueueInner::ver {
                         |r| {
                             r.add(0x1739, 1);
                             r.add(0x10009, utile_config.into());
-                            r.add(0x15379, cmdbuf.store_pipeline_bind.into());
-                            r.add(0x15381, cmdbuf.store_pipeline.into());
-                            r.add(0x15369, cmdbuf.load_pipeline_bind.into());
-                            r.add(0x15371, cmdbuf.load_pipeline.into());
-                            r.add(0x15131, cmdbuf.merge_upper_x.into());
-                            r.add(0x15139, cmdbuf.merge_upper_y.into());
+                            r.add(0x15379, cmdbuf.eot.rsrc_spec.into());
+                            r.add(0x15381, cmdbuf.eot.usc.into());
+                            r.add(0x15369, cmdbuf.bg.rsrc_spec.into());
+                            r.add(0x15371, cmdbuf.bg.usc.into());
+                            r.add(0x15131, cmdbuf.isp_merge_upper_x.into());
+                            r.add(0x15139, cmdbuf.isp_merge_upper_y.into());
                             r.add(0x100a1, 0);
                             r.add(0x15069, 0);
                             r.add(0x15071, 0); // pointer
@@ -950,56 +758,56 @@ impl super::QueueInner::ver {
                                 (((tile_info.tiles_y - 1) << 12) | (tile_info.tiles_x - 1)).into(),
                             ); // TE_SCREEN
                             r.add(0x16098, inner.scene.tvb_heapmeta_pointer().into());
-                            r.add(0x15109, cmdbuf.scissor_array); // ISP_SCISSOR_BASE
-                            r.add(0x15101, cmdbuf.depth_bias_array); // ISP_DBIAS_BASE
-                            r.add(0x15021, cmdbuf.iogpu_unk_214.into()); // aux_fb_info.unk_1
+                            r.add(0x15109, cmdbuf.isp_scissor_base); // ISP_SCISSOR_BASE
+                            r.add(0x15101, cmdbuf.isp_dbias_base); // ISP_DBIAS_BASE
+                            r.add(0x15021, isp_ctl.into()); // aux_fb_info.unk_1
                             r.add(
                                 0x15211,
-                                ((cmdbuf.fb_height as u64) << 32) | cmdbuf.fb_width as u64,
+                                ((cmdbuf.height as u64) << 32) | cmdbuf.width as u64,
                             ); // aux_fb_info.{width, heigh
-                            r.add(0x15049, unks.aux_fb_unk); // s2.aux_fb_info.unk3
-                            r.add(0x10051, cmdbuf.tib_blocks.into()); // s1.unk_2c
-                            r.add(0x15321, cmdbuf.depth_dimensions.into()); // ISP_ZLS_PIXELS
+                            r.add(0x15049, 0x100000); // s2.aux_fb_info.unk3
+                            r.add(0x10051, blocks_per_utile.into()); // s1.unk_2c
+                            r.add(0x15321, cmdbuf.isp_zls_pixels.into()); // ISP_ZLS_PIXELS
                             r.add(0x15301, cmdbuf.isp_bgobjdepth.into()); // ISP_BGOBJDEPTH
-                            r.add(0x15309, unks.load_bgobjvals); // ISP_BGOBJVALS
-                            r.add(0x15311, cmdbuf.visibility_result_buffer); // ISP_OCLQRY_BASE
+                            r.add(0x15309, load_bgobjvals); // ISP_BGOBJVALS
+                            r.add(0x15311, cmdbuf.isp_oclqry_base); // ISP_OCLQRY_BASE
                             r.add(0x15319, cmdbuf.zls_ctrl); // ISP_ZLSCTL
-                            r.add(0x15349, unks.g14_unk); // s2.unk_58_g14_0
+                            r.add(0x15349, g14_unk); // s2.unk_58_g14_0
                             r.add(0x15351, 0); // s2.unk_58_g14_8
-                            r.add(0x15329, cmdbuf.depth_buffer_load); // ISP_ZLOAD_BASE
-                            r.add(0x15331, cmdbuf.depth_buffer_store); // ISP_ZSTORE_BASE
-                            r.add(0x15339, cmdbuf.stencil_buffer_load); // ISP_STENCIL_LOAD_BASE
-                            r.add(0x15341, cmdbuf.stencil_buffer_store); // ISP_STENCIL_STORE_BASE
+                            r.add(0x15329, cmdbuf.depth.load); // ISP_ZLOAD_BASE
+                            r.add(0x15331, cmdbuf.depth.store); // ISP_ZSTORE_BASE
+                            r.add(0x15339, cmdbuf.stencil.load); // ISP_STENCIL_LOAD_BASE
+                            r.add(0x15341, cmdbuf.stencil.store); // ISP_STENCIL_STORE_BASE
                             r.add(0x15231, 0);
                             r.add(0x15221, 0);
                             r.add(0x15239, 0);
                             r.add(0x15229, 0);
-                            r.add(0x15401, cmdbuf.depth_buffer_load_stride);
-                            r.add(0x15421, cmdbuf.depth_buffer_store_stride);
-                            r.add(0x15409, cmdbuf.stencil_buffer_load_stride);
-                            r.add(0x15429, cmdbuf.stencil_buffer_store_stride);
-                            r.add(0x153c1, cmdbuf.depth_meta_buffer_load);
-                            r.add(0x15411, cmdbuf.depth_meta_buffer_load_stride);
-                            r.add(0x153c9, cmdbuf.depth_meta_buffer_store);
-                            r.add(0x15431, cmdbuf.depth_meta_buffer_store_stride);
-                            r.add(0x153d1, cmdbuf.stencil_meta_buffer_load);
-                            r.add(0x15419, cmdbuf.stencil_meta_buffer_load_stride);
-                            r.add(0x153d9, cmdbuf.stencil_meta_buffer_store);
-                            r.add(0x15439, cmdbuf.stencil_meta_buffer_store_stride);
+                            r.add(0x15401, cmdbuf.depth.load_stride as u64);
+                            r.add(0x15421, cmdbuf.depth.store_stride as u64);
+                            r.add(0x15409, cmdbuf.stencil.load_stride as u64);
+                            r.add(0x15429, cmdbuf.stencil.store_stride as u64);
+                            r.add(0x153c1, cmdbuf.depth.comp_load);
+                            r.add(0x15411, cmdbuf.depth.comp_load_stride as u64);
+                            r.add(0x153c9, cmdbuf.depth.comp_store);
+                            r.add(0x15431, cmdbuf.depth.comp_store_stride as u64);
+                            r.add(0x153d1, cmdbuf.stencil.comp_load);
+                            r.add(0x15419, cmdbuf.stencil.comp_load_stride as u64);
+                            r.add(0x153d9, cmdbuf.stencil.comp_store);
+                            r.add(0x15439, cmdbuf.stencil.comp_store_stride as u64);
                             r.add(0x16429, inner.scene.tvb_tilemap_pointer().into());
                             r.add(0x16060, inner.scene.tvb_layermeta_pointer().into());
                             r.add(0x16431, (4 * tile_info.params.rgn_size as u64) << 24); // ISP_RGN?
                             r.add(0x10039, tile_config); // tile_config ISP_CTL?
                             r.add(0x16451, 0x0); // ISP_RENDER_ORIGIN
-                            r.add(0x11821, cmdbuf.fragment_helper_program.into());
-                            r.add(0x11829, cmdbuf.fragment_helper_arg);
-                            r.add(0x11f79, cmdbuf.fragment_helper_cfg.into());
+                            r.add(0x11821, cmdbuf.fragment_helper.binary.into());
+                            r.add(0x11829, cmdbuf.fragment_helper.data);
+                            r.add(0x11f79, cmdbuf.fragment_helper.cfg.into());
                             r.add(0x15359, 0);
-                            r.add(0x10069, cmdbuf.fragment_usc_base); // USC_EXEC_BASE_ISP
+                            r.add(0x10069, cmdbuf.usc_base); // frag; USC_EXEC_BASE_ISP
                             r.add(0x16020, 0);
                             r.add(0x16461, inner.aux_fb.gpu_pointer().into());
                             r.add(0x16090, inner.aux_fb.gpu_pointer().into());
-                            r.add(0x120a1, unks.frg_unk_158);
+                            r.add(0x120a1, frg_unk_158);
                             r.add(0x160a8, 0);
                             r.add(0x16068, frg_tilecfg);
                             r.add(0x160b8, 0x0);
@@ -1014,65 +822,65 @@ impl super::QueueInner::ver {
                     ),
                     job_params3 <- try_init!(fw::fragment::raw::JobParameters3::ver {
                         depth_bias_array: fw::fragment::raw::ArrayAddr {
-                            ptr: U64(cmdbuf.depth_bias_array),
+                            ptr: U64(cmdbuf.isp_dbias_base),
                             unk_padding: U64(0),
                         },
                         scissor_array: fw::fragment::raw::ArrayAddr {
-                            ptr: U64(cmdbuf.scissor_array),
+                            ptr: U64(cmdbuf.isp_scissor_base),
                             unk_padding: U64(0),
                         },
-                        visibility_result_buffer: U64(cmdbuf.visibility_result_buffer),
+                        visibility_result_buffer: U64(cmdbuf.isp_oclqry_base),
                         unk_118: U64(0x0),
                         unk_120: Default::default(),
                         unk_reload_pipeline: fw::fragment::raw::ClearPipelineBinding {
-                            pipeline_bind: U64(cmdbuf.partial_reload_pipeline_bind as u64),
-                            address: U64(cmdbuf.partial_reload_pipeline as u64),
+                            pipeline_bind: U64(cmdbuf.partial_bg.rsrc_spec as u64),
+                            address: U64(cmdbuf.partial_bg.usc as u64),
                         },
                         unk_258: U64(0),
                         unk_260: U64(0),
                         unk_268: U64(0),
                         unk_270: U64(0),
                         reload_pipeline: fw::fragment::raw::ClearPipelineBinding {
-                            pipeline_bind: U64(cmdbuf.partial_reload_pipeline_bind as u64),
-                            address: U64(cmdbuf.partial_reload_pipeline as u64),
+                            pipeline_bind: U64(cmdbuf.partial_bg.rsrc_spec as u64),
+                            address: U64(cmdbuf.partial_bg.usc as u64),
                         },
-                        zls_ctrl: U64(unks.reload_zlsctrl),
-                        unk_290: U64(unks.g14_unk),
-                        depth_buffer_ptr1: U64(cmdbuf.depth_buffer_load),
-                        depth_buffer_stride3: U64(cmdbuf.depth_buffer_partial_stride),
-                        depth_meta_buffer_stride3: U64(cmdbuf.depth_meta_buffer_partial_stride),
-                        depth_buffer_ptr2: U64(cmdbuf.depth_buffer_store),
-                        depth_buffer_ptr3: U64(cmdbuf.depth_buffer_partial),
-                        depth_meta_buffer_ptr3: U64(cmdbuf.depth_meta_buffer_partial),
-                        stencil_buffer_ptr1: U64(cmdbuf.stencil_buffer_load),
-                        stencil_buffer_stride3: U64(cmdbuf.stencil_buffer_partial_stride),
-                        stencil_meta_buffer_stride3: U64(cmdbuf.stencil_meta_buffer_partial_stride),
-                        stencil_buffer_ptr2: U64(cmdbuf.stencil_buffer_store),
-                        stencil_buffer_ptr3: U64(cmdbuf.stencil_buffer_partial),
-                        stencil_meta_buffer_ptr3: U64(cmdbuf.stencil_meta_buffer_partial),
+                        zls_ctrl: U64(reload_zlsctrl),
+                        unk_290: U64(g14_unk),
+                        depth_buffer_ptr1: U64(cmdbuf.depth.load),
+                        depth_buffer_stride3: U64(cmdbuf.depth.partial_stride as u64),
+                        depth_meta_buffer_stride3: U64(cmdbuf.depth.comp_partial_stride as u64),
+                        depth_buffer_ptr2: U64(cmdbuf.depth.store),
+                        depth_buffer_ptr3: U64(cmdbuf.depth.partial),
+                        depth_meta_buffer_ptr3: U64(cmdbuf.depth.comp_partial),
+                        stencil_buffer_ptr1: U64(cmdbuf.stencil.load),
+                        stencil_buffer_stride3: U64(cmdbuf.stencil.partial_stride as u64),
+                        stencil_meta_buffer_stride3: U64(cmdbuf.stencil.comp_partial_stride as u64),
+                        stencil_buffer_ptr2: U64(cmdbuf.stencil.store),
+                        stencil_buffer_ptr3: U64(cmdbuf.stencil.partial),
+                        stencil_meta_buffer_ptr3: U64(cmdbuf.stencil.comp_partial),
                         unk_2f8: Default::default(),
-                        tib_blocks: cmdbuf.tib_blocks,
+                        tib_blocks: blocks_per_utile,
                         unk_30c: 0x0,
                         aux_fb_info,
                         tile_config: U64(tile_config),
                         unk_328_padding: Default::default(),
                         unk_partial_store_pipeline: fw::fragment::raw::StorePipelineBinding::new(
-                            cmdbuf.partial_store_pipeline_bind,
-                            cmdbuf.partial_store_pipeline
+                            cmdbuf.partial_eot.rsrc_spec,
+                            cmdbuf.partial_eot.usc
                         ),
                         partial_store_pipeline: fw::fragment::raw::StorePipelineBinding::new(
-                            cmdbuf.partial_store_pipeline_bind,
-                            cmdbuf.partial_store_pipeline
+                            cmdbuf.partial_eot.rsrc_spec,
+                            cmdbuf.partial_eot.usc
                         ),
                         isp_bgobjdepth: cmdbuf.isp_bgobjdepth,
                         isp_bgobjvals: cmdbuf.isp_bgobjvals,
-                        sample_size: cmdbuf.sample_size,
+                        sample_size: cmdbuf.sample_size as u32,
                         unk_37c: 0x0,
                         unk_380: U64(0x0),
                         unk_388: U64(0x0),
                         #[ver(V >= V13_0B4)]
                         unk_390_0: U64(0x0),
-                        depth_dimensions: U64(cmdbuf.depth_dimensions as u64),
+                        depth_dimensions: U64(cmdbuf.isp_zls_pixels as u64),
                     }),
                     unk_758_flag: 0,
                     unk_75c_flag: 0,
@@ -1081,33 +889,31 @@ impl super::QueueInner::ver {
                     tvb_overflow_count: 0,
                     unk_878: 0,
                     encoder_params <- try_init!(fw::job::raw::EncoderParams {
-                        unk_8: (cmdbuf.flags & uapi::ASAHI_RENDER_SET_WHEN_RELOADING_Z_OR_S as u64
-                            != 0) as u32,
+                        // Maybe set when reloading z/s?
+                        unk_8: 0,
                         sync_grow: 0,
                         unk_10: 0x0, // fixed
                         encoder_id: cmdbuf.encoder_id,
                         unk_18: 0x0, // fixed
-                        unk_mask: unks.frg_unk_mask as u32,
-                        sampler_array: U64(cmdbuf.fragment_sampler_array),
-                        sampler_count: cmdbuf.fragment_sampler_count,
-                        sampler_max: cmdbuf.fragment_sampler_max,
+                        unk_mask: 0xffffffffu32,
+                        sampler_array: U64(cmdbuf.sampler_heap),
+                        sampler_count: cmdbuf.sampler_count as u32,
+                        sampler_max: (cmdbuf.sampler_count as u32) + 1,
                     }),
                     process_empty_tiles: (cmdbuf.flags
                         & uapi::ASAHI_RENDER_PROCESS_EMPTY_TILES as u64
                         != 0) as u32,
-                    no_clear_pipeline_textures: (cmdbuf.flags
-                        & uapi::ASAHI_RENDER_NO_CLEAR_PIPELINE_TEXTURES as u64
-                        != 0) as u32,
-                    msaa_zs: (cmdbuf.flags & uapi::ASAHI_RENDER_MSAA_ZS as u64 != 0) as u32,
+                    // TODO: needs to be investigated
+                    no_clear_pipeline_textures: 1,
+                    // TODO: needs to be investigated
+                    msaa_zs: 0,
                     unk_pointee: 0,
                     #[ver(V >= V13_3)]
                     unk_v13_3: 0,
                     meta <- try_init!(fw::job::raw::JobMeta {
                         unk_0: 0,
                         unk_2: 0,
-                        no_preemption: (cmdbuf.flags
-                        & uapi::ASAHI_RENDER_NO_PREEMPTION as u64
-                        != 0) as u8,
+                        no_preemption: no_preemption as u8,
                         stamp: ev_frag.stamp_pointer,
                         fw_stamp: ev_frag.fw_stamp_pointer,
                         stamp_value: ev_frag.value.next(),
@@ -1149,18 +955,7 @@ impl super::QueueInner::ver {
             if let Some(err) = error {
                 fence.set_error(err.into());
             }
-            if let Some(mut res) = frag_result.as_ref().map(|a| a.lock()) {
-                cmd.timestamps.with(|raw, _inner| {
-                    res.result.fragment_ts_start = raw.frag.start.load(Ordering::Relaxed);
-                    res.result.fragment_ts_end = raw.frag.end.load(Ordering::Relaxed);
-                });
-                cmd.with(|raw, _inner| {
-                    res.result.num_tvb_overflows = raw.tvb_overflow_count;
-                });
-                res.frag_error = error;
-                res.frag_complete = true;
-                res.commit();
-            }
+
             fence.command_complete();
         })?;
 
@@ -1196,7 +991,6 @@ impl super::QueueInner::ver {
         let vtx = GpuObject::new_init_prealloc(
             kalloc.gpu_ro.alloc_object()?,
             |ptr: GpuWeakPointer<fw::vertex::RunVertex::ver>| {
-                let has_result = vtx_result.is_some();
                 let scene = scene.clone();
                 let vm_bind = vm_bind.clone();
                 let timestamps = timestamps.clone();
@@ -1253,7 +1047,7 @@ impl super::QueueInner::ver {
                             unk_178: (!clustering) as u32,
                         })?;
 
-                        if has_result || vtx_user_timestamps.any() {
+                        if vtx_user_timestamps.any() {
                             builder.add(microseq::Timestamp::ver {
                                 header: microseq::op::Timestamp::new(true),
                                 command_time: inner_weak_ptr!(ptr, command_time),
@@ -1277,7 +1071,7 @@ impl super::QueueInner::ver {
                             header: microseq::op::WaitForIdle2::HEADER,
                         })?;
 
-                        if has_result || vtx_user_timestamps.any() {
+                        if vtx_user_timestamps.any() {
                             builder.add(microseq::Timestamp::ver {
                                 header: microseq::op::Timestamp::new(false),
                                 command_time: inner_weak_ptr!(ptr, command_time),
@@ -1361,8 +1155,8 @@ impl super::QueueInner::ver {
                         tvb_cluster_tilemaps: inner.scene.cluster_tilemaps_pointer(),
                         tpc: inner.scene.tpc_pointer(),
                         tvb_heapmeta: inner.scene.tvb_heapmeta_pointer().or(0x8000_0000_0000_0000),
-                        iogpu_unk_54: U64(unks.iogpu_unk54), // fixed
-                        iogpu_unk_56: U64(unks.iogpu_unk56), // fixed
+                        iogpu_unk_54: U64(iogpu_unk54), // fixed
+                        iogpu_unk_56: U64(iogpu_unk56), // fixed
                         #[ver(G < G14)]
                         tvb_cluster_meta1: inner
                             .scene
@@ -1391,22 +1185,22 @@ impl super::QueueInner::ver {
                         #[ver(G < G14)]
                         tiling_control,
                         #[ver(G < G14)]
-                        unk_ac: unks.tiling_control_2 as u32, // fixed
+                        unk_ac: tiling_control_2 as u32, // fixed
                         unk_b0: Default::default(), // fixed
-                        pipeline_base: U64(cmdbuf.vertex_usc_base),
+                        pipeline_base: U64(cmdbuf.usc_base), // vertex
                         #[ver(G < G14)]
                         tvb_cluster_meta4: inner
                             .scene
                             .meta_4_pointer()
                             .map(|x| x.or(0x3000_0000_0000_0000)),
                         #[ver(G < G14)]
-                        unk_f0: U64(unks.vtx_unk_f0),
-                        unk_f8: U64(unks.vtx_unk_f8),     // fixed
-                        helper_program: cmdbuf.vertex_helper_program,
+                        unk_f0: U64(vtx_unk_f0),
+                        unk_f8: U64(0x8c60),     // fixed
+                        helper_program: cmdbuf.vertex_helper.binary,
                         unk_104: 0,
-                        helper_arg: U64(cmdbuf.vertex_helper_arg),
+                        helper_arg: U64(cmdbuf.vertex_helper.data),
                         unk_110: Default::default(),      // fixed
-                        unk_118: unks.vtx_unk_118 as u32, // fixed
+                        unk_118: vtx_unk_118 as u32, // fixed
                         __pad: Default::default(),
                     }),
                     #[ver(G < G14X)]
@@ -1434,8 +1228,8 @@ impl super::QueueInner::ver {
                                 .into();
                             r.add(0x1c031, tvb_heapmeta_ptr);
                             r.add(0x1c9c0, tvb_heapmeta_ptr);
-                            r.add(0x1c051, unks.iogpu_unk54); // iogpu_unk_54/55
-                            r.add(0x1c061, unks.iogpu_unk56); // iogpu_unk_56
+                            r.add(0x1c051, iogpu_unk54); // iogpu_unk_54/55
+                            r.add(0x1c061, iogpu_unk56); // iogpu_unk_56
                             r.add(0x10149, utile_config.into()); // s2.unk_48 utile_config
                             r.add(0x10139, cmdbuf.ppp_multisamplectl); // PPP_MULTISAMPLECTL
                             r.add(0x10111, inner.scene.preempt_buf_1_pointer().into());
@@ -1463,7 +1257,7 @@ impl super::QueueInner::ver {
                                 inner.scene.meta_3_pointer().map_or(0, |a| a.into()),
                             ); // tvb_cluster_meta3
                             r.add(0x1c890, tiling_control.into()); // tvb_tiling_control
-                            r.add(0x1c918, unks.tiling_control_2);
+                            r.add(0x1c918, tiling_control_2);
                             r.add(0x1c079, inner.scene.tvb_layermeta_pointer().into());
                             r.add(0x1c9d8, inner.scene.tvb_layermeta_pointer().into());
                             let cl_layermeta_pointer =
@@ -1474,7 +1268,7 @@ impl super::QueueInner::ver {
                                 inner.scene.meta_4_pointer().map_or(0, |a| a.into());
                             r.add(0x16c41, cl_meta_4_pointer); // tvb_cluster_meta4
                             r.add(0x1ca40, cl_meta_4_pointer); // tvb_cluster_meta4
-                            r.add(0x1c9a8, unks.vtx_unk_f0); // + meta1_blocks? min_free_tvb_pages?
+                            r.add(0x1c9a8, vtx_unk_f0); // + meta1_blocks? min_free_tvb_pages?
                             r.add(
                                 0x1c920,
                                 inner.scene.meta_1_pointer().map_or(0, |a| a.into()),
@@ -1485,10 +1279,10 @@ impl super::QueueInner::ver {
                             r.add(0x1c1a9, 0); // 0x10151 bit 1 enables
                             r.add(0x1c1b1, 0);
                             r.add(0x1c1b9, 0);
-                            r.add(0x10061, cmdbuf.vertex_usc_base); // USC_EXEC_BASE_TA
-                            r.add(0x11801, cmdbuf.vertex_helper_program.into());
-                            r.add(0x11809, cmdbuf.vertex_helper_arg);
-                            r.add(0x11f71, cmdbuf.vertex_helper_cfg.into());
+                            r.add(0x10061, cmdbuf.usc_base); // vertex; USC_EXEC_BASE_TA
+                            r.add(0x11801, cmdbuf.vertex_helper.binary.into());
+                            r.add(0x11809, cmdbuf.vertex_helper.data);
+                            r.add(0x11f71, cmdbuf.vertex_helper.cfg.into());
                             r.add(0x1c0b1, tile_info.params.rgn_size.into()); // TE_PSG
                             r.add(0x1c850, tile_info.params.rgn_size.into());
                             r.add(0x10131, tile_info.params.unk_4.into());
@@ -1505,7 +1299,7 @@ impl super::QueueInner::ver {
                             r.add(0x1c0a9, tile_info.params.tpc_stride.into()); // TE_TPC
                             r.add(0x10171, tile_info.params.unk_24.into());
                             r.add(0x10169, tile_info.params.unk_28.into()); // TA_RENDER_TARGET_MAX
-                            r.add(0x12099, unks.vtx_unk_118);
+                            r.add(0x12099, vtx_unk_118);
                             r.add(0x1c9e8, (tile_info.params.unk_28 & 0x4fff).into());
                             /*
                             r.add(0x10209, 0x100); // Some kind of counter?? Does this matter?
@@ -1548,10 +1342,10 @@ impl super::QueueInner::ver {
                         unk_10: 0x0,    // fixed
                         encoder_id: cmdbuf.encoder_id,
                         unk_18: 0x0, // fixed
-                        unk_mask: unks.vtx_unk_mask as u32,
-                        sampler_array: U64(cmdbuf.vertex_sampler_array),
-                        sampler_count: cmdbuf.vertex_sampler_count,
-                        sampler_max: cmdbuf.vertex_sampler_max,
+                        unk_mask: 0xffffffffu32,
+                        sampler_array: U64(cmdbuf.sampler_heap),
+                        sampler_count: cmdbuf.sampler_count as u32,
+                        sampler_max: (cmdbuf.sampler_count as u32) + 1,
                     }),
                     unk_55c: 0,
                     unk_560: 0,
@@ -1563,9 +1357,7 @@ impl super::QueueInner::ver {
                     meta <- try_init!(fw::job::raw::JobMeta {
                         unk_0: 0,
                         unk_2: 0,
-                        no_preemption: (cmdbuf.flags
-                        & uapi::ASAHI_RENDER_NO_PREEMPTION as u64
-                        != 0) as u8,
+                        no_preemption: no_preemption as u8,
                         stamp: ev_vtx.stamp_pointer,
                         fw_stamp: ev_vtx.fw_stamp_pointer,
                         stamp_value: ev_vtx.value.next(),
@@ -1605,19 +1397,7 @@ impl super::QueueInner::ver {
             if let Some(err) = error {
                 fence.set_error(err.into())
             }
-            if let Some(mut res) = vtx_result.as_ref().map(|a| a.lock()) {
-                cmd.timestamps.with(|raw, _inner| {
-                    res.result.vertex_ts_start = raw.vtx.start.load(Ordering::Relaxed);
-                    res.result.vertex_ts_end = raw.vtx.end.load(Ordering::Relaxed);
-                });
-                res.result.tvb_usage_bytes = cmd.scene.used_bytes() as u64;
-                if cmd.scene.overflowed() {
-                    res.result.flags |= uapi::DRM_ASAHI_RESULT_RENDER_TVB_OVERFLOWED as u64;
-                }
-                res.vtx_error = error;
-                res.vtx_complete = true;
-                res.commit();
-            }
+
             fence.command_complete();
         })?;
 

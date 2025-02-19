@@ -43,7 +43,6 @@ pub(crate) trait Queue: Send + Sync {
         id: u64,
         in_syncs: KVec<file::SyncItem>,
         out_syncs: KVec<file::SyncItem>,
-        result_buf: Option<gem::ObjectRef>,
         commands: KVec<uapi::drm_asahi_command>,
         objects: Pin<&xarray::XArray<KBox<file::Object>>>,
     ) -> Result;
@@ -350,23 +349,6 @@ impl Drop for QueueJob::ver {
     }
 }
 
-struct ResultWriter {
-    vmap: VMap<gem::DriverObject>,
-    offset: usize,
-    len: usize,
-}
-
-impl ResultWriter {
-    fn write<T>(&mut self, mut value: T) {
-        let p: *mut u8 = &mut value as *mut _ as *mut u8;
-        // SAFETY: We know `p` points to a type T of that size, and UAPI types must have
-        // no padding and all bit patterns valid.
-        let slice = unsafe { core::slice::from_raw_parts_mut(p, core::mem::size_of::<T>()) };
-        let len = slice.len().min(self.len);
-        self.vmap.as_mut_slice()[self.offset..self.offset + len].copy_from_slice(&slice[..len]);
-    }
-}
-
 static QUEUE_NAME: &CStr = c_str!("asahi_fence");
 static QUEUE_CLASS_KEY: kernel::sync::LockClassKey = kernel::static_lock_class!();
 
@@ -483,14 +465,7 @@ impl Queue::ver {
                     WQ_SIZE,
                 )?,
             });
-        }
 
-        // Rendering & blit structures
-        if caps
-            & (uapi::drm_asahi_queue_cap_DRM_ASAHI_QUEUE_CAP_RENDER
-                | uapi::drm_asahi_queue_cap_DRM_ASAHI_QUEUE_CAP_BLIT)
-            != 0
-        {
             ret.q_frag = Some(SubQueue::ver {
                 wq: workqueue::WorkQueue::ver::new(
                     dev,
@@ -539,7 +514,6 @@ impl Queue for Queue::ver {
         id: u64,
         in_syncs: KVec<file::SyncItem>,
         out_syncs: KVec<file::SyncItem>,
-        result_buf: Option<gem::ObjectRef>,
         commands: KVec<uapi::drm_asahi_command>,
         objects: Pin<&xarray::XArray<KBox<file::Object>>>,
     ) -> Result {
@@ -710,51 +684,11 @@ impl Queue for Queue::ver {
                 }
             }
 
-            let result_writer = match result_buf.as_ref() {
-                None => {
-                    if cmd.result_offset != 0 || cmd.result_size != 0 {
-                        cls_pr_debug!(Errors, "No result buffer but result requested\n");
-                        return Err(EINVAL);
-                    }
-                    None
-                }
-                Some(buf) => {
-                    if cmd.result_size != 0 {
-                        let end_offset = cmd
-                            .result_offset
-                            .checked_add(cmd.result_size)
-                            .ok_or_else(|| {
-                                cls_pr_debug!(Errors, "result_offset + result_size overflow\n");
-                                EINVAL
-                            })?;
-                        if end_offset > buf.size() as u64 {
-                            cls_pr_debug!(
-                                Errors,
-                                "Result buffer overflow ({} + {} > {})\n",
-                                cmd.result_offset,
-                                cmd.result_size,
-                                buf.size()
-                            );
-
-                            return Err(EINVAL);
-                        }
-                        Some(ResultWriter {
-                            vmap: buf.gem.vmap()?,
-                            offset: cmd.result_offset.try_into()?,
-                            len: cmd.result_size.try_into()?,
-                        })
-                    } else {
-                        None
-                    }
-                }
-            };
-
             match cmd.cmd_type {
                 uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_RENDER => {
                     self.inner.submit_render(
                         &mut job,
                         &cmd,
-                        result_writer,
                         objects,
                         id,
                         last_render.unwrap() == i,
@@ -776,7 +710,6 @@ impl Queue for Queue::ver {
                     self.inner.submit_compute(
                         &mut job,
                         &cmd,
-                        result_writer,
                         objects,
                         id,
                         last_compute.unwrap() == i,

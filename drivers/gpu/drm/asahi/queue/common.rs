@@ -43,16 +43,17 @@ pub(super) fn build_attachments(pointer: u64, count: u32) -> Result<microseq::At
         if att.flags != 0 {
             return Err(EINVAL);
         }
-        if att.order < 1 || att.order > 6 {
-            return Err(EINVAL);
-        }
+
+        // Some kind of power-of-2 exponent related to attachment size, in
+        // bounds [1, 6]? We don't know what this is exactly yet.
+        let unk_e = 1;
 
         let cache_lines = (att.size + 127) >> 7;
         attachments.list[i as usize] = microseq::Attachment {
             address: U64(att.pointer),
             size: cache_lines.try_into()?,
             unk_c: 0x17,
-            unk_e: att.order as u16,
+            unk_e: unk_e as u16,
         };
 
         attachments.count += 1;
@@ -63,17 +64,17 @@ pub(super) fn build_attachments(pointer: u64, count: u32) -> Result<microseq::At
 
 pub(super) fn get_timestamp_object(
     objects: Pin<&xarray::XArray<KBox<file::Object>>>,
-    handle: u32,
-    offset: u32,
+    timestamp: uapi::drm_asahi_timestamp,
 ) -> Result<Option<UserTimestamp>> {
-    if handle == 0 {
+    if timestamp.handle == 0 {
         return Ok(None);
     }
 
-    let object = objects.get(handle.try_into()?).ok_or(ENOENT)?;
+    let object = objects.get(timestamp.handle.try_into()?).ok_or(ENOENT)?;
 
     #[allow(irrefutable_let_patterns)]
     if let file::Object::TimestampBuffer(mapping) = object.borrow() {
+        let offset = timestamp.offset;
         if (offset.checked_add(8).ok_or(EINVAL)?) as usize > mapping.size() {
             return Err(ERANGE);
         }

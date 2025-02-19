@@ -63,43 +63,6 @@ pub(crate) enum WorkError {
     Unknown,
 }
 
-impl From<WorkError> for uapi::drm_asahi_result_info {
-    fn from(err: WorkError) -> Self {
-        match err {
-            WorkError::Fault(info) => Self {
-                status: uapi::drm_asahi_status_DRM_ASAHI_STATUS_FAULT,
-                fault_type: match info.reason {
-                    FaultReason::Unmapped => uapi::drm_asahi_fault_DRM_ASAHI_FAULT_UNMAPPED,
-                    FaultReason::AfFault => uapi::drm_asahi_fault_DRM_ASAHI_FAULT_AF_FAULT,
-                    FaultReason::WriteOnly => uapi::drm_asahi_fault_DRM_ASAHI_FAULT_WRITE_ONLY,
-                    FaultReason::ReadOnly => uapi::drm_asahi_fault_DRM_ASAHI_FAULT_READ_ONLY,
-                    FaultReason::NoAccess => uapi::drm_asahi_fault_DRM_ASAHI_FAULT_NO_ACCESS,
-                    FaultReason::Unknown(_) => uapi::drm_asahi_fault_DRM_ASAHI_FAULT_UNKNOWN,
-                },
-                unit: info.unit_code.into(),
-                sideband: info.sideband.into(),
-                level: info.level,
-                extra: info.unk_5.into(),
-                is_read: info.read as u8,
-                pad: 0,
-                address: info.address,
-            },
-            a => Self {
-                status: match a {
-                    WorkError::Timeout => uapi::drm_asahi_status_DRM_ASAHI_STATUS_TIMEOUT,
-                    WorkError::Killed => uapi::drm_asahi_status_DRM_ASAHI_STATUS_KILLED,
-                    WorkError::ChannelError(_) => {
-                        uapi::drm_asahi_status_DRM_ASAHI_STATUS_CHANNEL_ERROR
-                    }
-                    WorkError::NoDevice => uapi::drm_asahi_status_DRM_ASAHI_STATUS_NO_DEVICE,
-                    _ => uapi::drm_asahi_status_DRM_ASAHI_STATUS_UNKNOWN_ERROR,
-                },
-                ..Default::default()
-            },
-        }
-    }
-}
-
 impl From<WorkError> for kernel::error::Error {
     fn from(err: WorkError) -> Self {
         match err {
