@@ -782,6 +782,103 @@
 			interrupts = <AIC_IRQ 379 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
+		efuse@23d2c8000 {
+			compatible = "apple,t8112-efuses", "apple,efuses";
+			reg = <0x2 0x3d2c8000 0x0 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			atcphy0_auspll_rodco_bias_adjust: efuse@482,4 {
+				reg = <0x482 1>;
+				bits = <4 3>;
+			};
+
+			atcphy0_auspll_rodco_encap: efuse@482,7 {
+				reg = <0x482 2>;
+				bits = <7 2>;
+			};
+
+			atcphy0_auspll_dtc_vreg_adjust: efuse@483,1 {
+				reg = <0x483 1>;
+				bits = <1 3>;
+			};
+
+			atcphy0_auspll_fracn_dll_start_capcode: efuse@483,4 {
+				reg = <0x483 1>;
+				bits = <4 2>;
+			};
+
+			atcphy0_aus_cmn_shm_vreg_trim: efuse@483,6 {
+				reg = <0x483 2>;
+				bits = <6 5>;
+			};
+
+			atcphy0_cio3pll_dco_coarsebin0: efuse@484,3 {
+				reg = <0x484 2>;
+				bits = <3 6>;
+			};
+
+			atcphy0_cio3pll_dco_coarsebin1: efuse@485,1 {
+				reg = <0x485 1>;
+				bits = <1 6>;
+			};
+
+			atcphy0_cio3pll_dll_start_capcode: efuse@485,7 {
+				reg = <0x485 2>;
+				bits = <7 2>;
+			};
+
+			atcphy0_cio3pll_dtc_vreg_adjust: efuse@486,1 {
+				reg = <0x486 1>;
+				bits = <1 3>;
+			};
+
+			atcphy1_auspll_rodco_bias_adjust: efuse@487,6 {
+				reg = <0x487 2>;
+				bits = <6 3>;
+			};
+
+			atcphy1_auspll_rodco_encap: efuse@488,1 {
+				reg = <0x488 1>;
+				bits = <1 2>;
+			};
+
+			atcphy1_auspll_dtc_vreg_adjust: efuse@488,3 {
+				reg = <0x488 1>;
+				bits = <3 3>;
+			};
+
+			atcphy1_auspll_fracn_dll_start_capcode: efuse@488,6 {
+				reg = <0x488 1>;
+				bits = <6 2>;
+			};
+
+			atcphy1_aus_cmn_shm_vreg_trim: efuse@489,0 {
+				reg = <0x489 1>;
+				bits = <0 5>;
+			};
+
+			atcphy1_cio3pll_dco_coarsebin0: efuse@489,5 {
+				reg = <0x489 2>;
+				bits = <5 6>;
+			};
+
+			atcphy1_cio3pll_dco_coarsebin1: efuse@48a,3 {
+				reg = <0x48a 2>;
+				bits = <3 6>;
+			};
+
+			atcphy1_cio3pll_dll_start_capcode: efuse@48b,1 {
+				reg = <0x48b 1>;
+				bits = <1 2>;
+			};
+
+			atcphy1_cio3pll_dtc_vreg_adjust: efuse@48b,3 {
+				reg = <0x48b 1>;
+				bits = <3 3>;
+			};
+		};
+
 		pinctrl_smc: pinctrl@23e820000 {
 			compatible = "apple,t8112-pinctrl", "apple,pinctrl";
 			reg = <0x2 0x3e820000 0x0 0x4000>;
