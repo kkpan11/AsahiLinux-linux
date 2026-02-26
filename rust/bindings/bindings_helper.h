@@ -61,6 +61,7 @@
 #include <linux/i2c.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/types.h>
+#include <linux/iommu.h>
 #include <linux/ioport.h>
 #include <linux/jiffies.h>
 #include <linux/jump_label.h>
