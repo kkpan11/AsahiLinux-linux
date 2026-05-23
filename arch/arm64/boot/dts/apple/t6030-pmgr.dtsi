@@ -1135,7 +1135,7 @@
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
 		label = "apcie_sys_st";
-		apple,always-on; /* macOS does not turn this off */
+		power-domains = <&ps_apcie_st>, <&ps_ans>;
 	};
 
 	ps_apcie_phy_sw: power-controller@5b8 {
@@ -1144,6 +1144,7 @@
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
 		label = "apcie_phy_sw";
+		apple,always-on; /* macOS does not turn this off */
 	};
 
 	ps_sep: power-controller@c00 {
