@@ -74,4 +74,6 @@
 	};
 };
 
+#include "hwmon-common.dtsi"
+
 #include "spi1-nvram.dtsi"

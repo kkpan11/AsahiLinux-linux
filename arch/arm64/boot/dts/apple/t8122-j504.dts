@@ -101,3 +101,5 @@
 	};
 };
 
+#include "hwmon-fan-dual.dtsi"
+#include "hwmon-laptop.dtsi"

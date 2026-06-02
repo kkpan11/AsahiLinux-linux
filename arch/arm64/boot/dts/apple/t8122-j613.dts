@@ -80,3 +80,5 @@
 	tp_accel {
 	};
 };
+
+#include "hwmon-laptop.dtsi"
