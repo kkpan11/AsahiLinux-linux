@@ -16,7 +16,7 @@ use crate::{
             Region,
             Resource, //
         },
-        Io,
+        IoBase,
         Mmio,
         MmioBackend,
         MmioRaw, //
@@ -212,7 +212,7 @@ impl<'a, const SIZE: usize> ExclusiveIoMem<'a, SIZE> {
     }
 }
 
-impl<'a, const SIZE: usize> Io<'a> for &'a ExclusiveIoMem<'_, SIZE> {
+impl<'a, const SIZE: usize> IoBase<'a> for &'a ExclusiveIoMem<'_, SIZE> {
     type Backend = MmioBackend;
     type Target = super::Region<SIZE>;
 
@@ -294,7 +294,7 @@ impl<const SIZE: usize> Drop for IoMem<'_, SIZE> {
     }
 }
 
-impl<'a, const SIZE: usize> Io<'a> for &'a IoMem<'_, SIZE> {
+impl<'a, const SIZE: usize> IoBase<'a> for &'a IoMem<'_, SIZE> {
     type Backend = MmioBackend;
     type Target = super::Region<SIZE>;
 
