@@ -16,7 +16,9 @@ use crate::{
             Region,
             Resource, //
         },
-        MmioOwned,
+        Io,
+        Mmio,
+        MmioBackend,
         MmioRaw, //
     },
     prelude::*,
@@ -210,11 +212,13 @@ impl<'a, const SIZE: usize> ExclusiveIoMem<'a, SIZE> {
     }
 }
 
-impl<const SIZE: usize> Deref for ExclusiveIoMem<'_, SIZE> {
-    type Target = MmioOwned<SIZE>;
+impl<'a, const SIZE: usize> Io<'a> for &'a ExclusiveIoMem<'_, SIZE> {
+    type Backend = MmioBackend;
+    type Target = super::Region<SIZE>;
 
-    fn deref(&self) -> &Self::Target {
-        &self.iomem
+    #[inline]
+    fn as_view(self) -> Mmio<'a, Self::Target> {
+        self.iomem.as_view()
     }
 }
 
@@ -290,11 +294,13 @@ impl<const SIZE: usize> Drop for IoMem<'_, SIZE> {
     }
 }
 
-impl<const SIZE: usize> Deref for IoMem<'_, SIZE> {
-    type Target = MmioOwned<SIZE>;
+impl<'a, const SIZE: usize> Io<'a> for &'a IoMem<'_, SIZE> {
+    type Backend = MmioBackend;
+    type Target = super::Region<SIZE>;
 
-    fn deref(&self) -> &Self::Target {
+    #[inline]
+    fn as_view(self) -> Mmio<'a, Self::Target> {
         // SAFETY: Safe as by the invariant of `IoMem`.
-        unsafe { MmioOwned::from_raw(&self.io) }
+        unsafe { Mmio::from_raw(self.io) }
     }
 }
