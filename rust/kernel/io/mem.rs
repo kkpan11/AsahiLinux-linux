@@ -2,7 +2,6 @@
 
 //! Generic memory-mapped IO.
 
-use core::ops::Deref;
 use core::ptr::NonNull;
 
 use crate::{
