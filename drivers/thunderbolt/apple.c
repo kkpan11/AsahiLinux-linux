@@ -51,6 +51,8 @@
  * Copyright (c) Sven Peter <sven@kernel.org>
  */
 
+#define DEBUG
+
 #include <linux/bitfield.h>
 #include <linux/completion.h>
 #include <linux/interrupt.h>
