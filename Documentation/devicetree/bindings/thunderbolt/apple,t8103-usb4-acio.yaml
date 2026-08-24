@@ -59,7 +59,6 @@ properties:
       co-processor
 
   power-domains:
-    minItems: 3
     maxItems: 3
 
   thunderbolt-switch: true
