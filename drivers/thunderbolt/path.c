@@ -280,6 +280,9 @@ struct tb_path *tb_path_alloc(struct tb *tb, struct tb_port *src, int src_hopid,
 		if (ret < 0)
 			goto err;
 		in_hopid = ret;
+		path->hops[i].in_hop_index = in_hopid;
+		path->hops[i].in_port = in_port;
+		path->hops[i].in_counter_index = -1;
 
 		out_port = tb_next_port_on_path(src, dst, in_port);
 		if (!out_port)
@@ -316,10 +319,6 @@ struct tb_path *tb_path_alloc(struct tb *tb, struct tb_port *src, int src_hopid,
 		if (ret < 0)
 			goto err;
 		out_hopid = ret;
-
-		path->hops[i].in_hop_index = in_hopid;
-		path->hops[i].in_port = in_port;
-		path->hops[i].in_counter_index = -1;
 		path->hops[i].out_port = out_port;
 		path->hops[i].next_hop_index = out_hopid;
 
