@@ -211,6 +211,7 @@ struct cd321x {
 
 	struct typec_altmode *port_altmode_dp;
 	struct typec_altmode *port_altmode_tbt;
+	struct typec_altmode *port_altmode_usb4;
 
 	struct typec_mux *mux;
 	struct typec_mux_state state;
@@ -1312,6 +1313,18 @@ static int cd321x_register_port_altmodes(struct cd321x *cd321x)
 	}
 	cd321x->port_altmode_tbt = amode;
 
+	memset(&desc, 0, sizeof(desc));
+	desc.mode_kind = TYPEC_MODE_KIND_USB4;
+	amode = typec_port_register_altmode(cd321x->tps.port, &desc);
+	if (IS_ERR(amode)) {
+		typec_unregister_altmode(cd321x->port_altmode_dp);
+		typec_unregister_altmode(cd321x->port_altmode_tbt);
+		cd321x->port_altmode_dp = NULL;
+		cd321x->port_altmode_tbt = NULL;
+		return PTR_ERR(amode);
+	}
+	cd321x->port_altmode_usb4 = amode;
+
 	return 0;
 }
 
@@ -1347,8 +1360,10 @@ cd321x_register_port(struct tps6598x *tps, struct fwnode_handle *fwnode)
 err_unregister_altmodes:
 	typec_unregister_altmode(cd321x->port_altmode_dp);
 	typec_unregister_altmode(cd321x->port_altmode_tbt);
+	typec_unregister_altmode(cd321x->port_altmode_usb4);
 	cd321x->port_altmode_dp = NULL;
 	cd321x->port_altmode_tbt = NULL;
+	cd321x->port_altmode_usb4 = NULL;
 err_unregister_port:
 	typec_unregister_port(tps->port);
 	return ret;
@@ -1371,6 +1386,8 @@ cd321x_unregister_port(struct tps6598x *tps)
 	cd321x->port_altmode_dp = NULL;
 	typec_unregister_altmode(cd321x->port_altmode_tbt);
 	cd321x->port_altmode_tbt = NULL;
+	typec_unregister_altmode(cd321x->port_altmode_usb4);
+	cd321x->port_altmode_usb4 = NULL;
 	typec_unregister_port(tps->port);
 }
 
