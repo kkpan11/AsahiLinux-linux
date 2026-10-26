@@ -145,7 +145,6 @@ static int hw_atl2_hw_reset(struct aq_hw_s *self)
 	if (err)
 		return err;
 
-	memset(priv, 0, sizeof(*priv));
 	memset(&priv->last_stats, 0, sizeof(priv->last_stats));
 	memset(priv->l3_v4_filters, 0, sizeof(priv->l3_v4_filters));
 	memset(priv->l3_v6_filters, 0, sizeof(priv->l3_v6_filters));
